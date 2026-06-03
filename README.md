@@ -91,13 +91,20 @@ Every `a2g enforce` call runs 8 deterministic steps:
 | 1 | **Revocation** | Checks if the mandate has been revoked before TTL expiry |
 | 2 | **Signature** | ed25519 verification with domain-separated payloads (`MANDATE:`) |
 | 3 | **TTL** | Rejects expired mandates (max 8760h / 1 year) |
-| 4 | **Tool + Boundary** | Allow/deny list matching, filesystem/network glob enforcement with `workspace_root` resolution |
+| 4 | **Tool + Boundary** | Allow/deny list matching, filesystem/network glob enforcement with `workspace_root` resolution. `enforce()` resolves paths via `std::fs::canonicalize` before evaluation, mitigating the static symlink-escape case. |
 | 5 | **Jurisdiction** | Region, environment, operating hours (numeric minute comparison) |
 | 6 | **Escalation** | Pattern-matched actions that require human approval |
 | 7 | **Rate Limit** | Per-minute call cap from mandate |
 | 8 | **Authority Chain** | Validates delegation chain signatures, scope constraints, key-DID binding, revocation status |
 
 Result: `ALLOW`, `DENY`, or `ESCALATE` — each producing a signed, hash-chained receipt in the SQLite ledger.
+
+> **`fs_read` / `fs_write` / `fs_deny` are path-string policy checks, not OS-level confinement.**
+> `enforce()` resolves symlinks before evaluation (mitigating the static case), but a symlink planted
+> between the `enforce()` call and the executor's `open()` call escapes this check (TOCTOU).
+> Real confinement requires the agent runtime to run inside a sandbox — Linux namespaces, seccomp,
+> or a container — that independently enforces the same boundaries at the kernel level.
+> See `docs/adr/0004-pure-decision-path.md` §Symlink mitigation for the full threat model.
 
 ## CLI Reference
 
