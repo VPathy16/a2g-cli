@@ -4,14 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  ci:
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -21,11 +17,30 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace (release)
+        run: cargo build --workspace --release
+
+      - name: Unit tests
+        run: cargo test --workspace
+
+      - name: Verify a2g-core has no rusqlite dependency
+        run: |
+          cargo build -p a2g-core
+          if cargo tree -p a2g-core | grep -q rusqlite; then
+            echo "FAIL: rusqlite found in a2g-core dependency tree"
+            cargo tree -p a2g-core | grep rusqlite
+            exit 1
+          fi
+          echo "OK: rusqlite absent from a2g-core"
+
+      - name: Battle test suite
+        run: A2G_BIN=./target/release/a2g bash tests/battle_test.sh
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -W clippy::all
+        run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run tests
-        run: cargo test --all-features
+      - name: Formatting
+        run: cargo fmt --check
