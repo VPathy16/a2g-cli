@@ -65,6 +65,13 @@ The feature flag `default = ["std"]` is in place. Disabling it (`--no-default-fe
 | **Reason** | `serde_json` supports `alloc`-only mode (`no_std` + global allocator) via `std = false` feature, but `serde_json::Value` internally uses `std::collections::BTreeMap`. This may work in practice with `alloc`. |
 | **Candidate replacement** | Enable `serde_json`'s `alloc` feature flag; audit whether `Value` works in alloc-only. Lower-risk alternative: `serde-json-core` for fixed-buffer JSON parsing. |
 
+### Note: `vehicle` module (ADR-0005) — no new blockers
+
+`crates/a2g-core/src/vehicle.rs` is no_std-compatible on the decision path:
+- `classify_vehicle_tool()` and `evaluate_vehicle_state()` are pure with no heap allocation on the Allow path.
+- `StateVerdict::Deny` carries `&'static str` (no heap).
+- `extract_vehicle_state()` uses `serde_json` — already covered by Blocker 7 above.
+
 ### 8. `ed25519-dalek` — getrandom dependency
 
 | | |

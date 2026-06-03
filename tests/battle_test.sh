@@ -402,6 +402,72 @@ else
 fi
 
 # ═══════════════════════════════════════════════════
+section "VEHICLE CAPABILITY"
+# ═══════════════════════════════════════════════════
+
+# Create a cabin agent with vehicle tools, including a forbidden one.
+$A2G init --name "cabin-agent" --out "$TEST_DIR" >/dev/null 2>&1
+CABIN_MANDATE="$TEST_DIR/cabin-agent.mandate.toml"
+CABIN_LEDGER="$TEST_DIR/cabin.db"
+
+# Replace default tools with vehicle tools spanning all domains.
+# vehicle.powertrain.start_engine is Forbidden — it should be denied even though it's listed.
+sed -i 's|tools = \["read_file", "write_file"\]|tools = ["vehicle.climate.set_temperature", "vehicle.window.set_position", "vehicle.powertrain.start_engine"]|' "$CABIN_MANDATE"
+
+$A2G sign --mandate "$CABIN_MANDATE" --key "$SOV_KEY" --ttl 24 --skip-proposal >/dev/null 2>&1
+
+# Test 1: Comfort ALLOW — climate while moving (no state gating for comfort domain)
+RESULT=$($A2G --output json enforce \
+    --mandate "$CABIN_MANDATE" \
+    --tool vehicle.climate.set_temperature \
+    --params '{"setting":"22C"}' \
+    --vehicle-state '{"speed_kph":80.0,"gear":"Drive","actor":"Passenger"}' \
+    --ledger "$CABIN_LEDGER" 2>&1 || true)
+if echo "$RESULT" | grep -q '"ALLOW"'; then
+    pass "Vehicle comfort ALLOW while moving (climate, 80 kph, Passenger)"
+else
+    fail "Expected ALLOW for comfort tool while moving. Got: $RESULT"
+fi
+
+# Test 2: Sensitive ALLOW — window while Park+stopped
+RESULT=$($A2G --output json enforce \
+    --mandate "$CABIN_MANDATE" \
+    --tool vehicle.window.set_position \
+    --params '{"position":50}' \
+    --vehicle-state '{"speed_kph":0.0,"gear":"Park","actor":"Driver"}' \
+    --ledger "$CABIN_LEDGER" 2>&1 || true)
+if echo "$RESULT" | grep -q '"ALLOW"'; then
+    pass "Vehicle sensitive ALLOW when Park+stopped (window, 0 kph)"
+else
+    fail "Expected ALLOW for window when parked. Got: $RESULT"
+fi
+
+# Test 3: Sensitive DENY — window while moving (vehicle state gate fires)
+RESULT=$($A2G --output json enforce \
+    --mandate "$CABIN_MANDATE" \
+    --tool vehicle.window.set_position \
+    --params '{"position":50}' \
+    --vehicle-state '{"speed_kph":60.0,"gear":"Drive","actor":"Driver"}' \
+    --ledger "$CABIN_LEDGER" 2>&1 || true)
+if echo "$RESULT" | grep -q "vehicle_state_violation"; then
+    pass "Vehicle sensitive DENY while moving (window, 60 kph)"
+else
+    fail "Expected vehicle_state_violation DENY for window while moving. Got: $RESULT"
+fi
+
+# Test 4: Forbidden DENY — powertrain hard deny even though listed in mandate
+RESULT=$($A2G --output json enforce \
+    --mandate "$CABIN_MANDATE" \
+    --tool vehicle.powertrain.start_engine \
+    --params '{}' \
+    --ledger "$CABIN_LEDGER" 2>&1 || true)
+if echo "$RESULT" | grep -q "vehicle_forbidden_domain"; then
+    pass "Vehicle forbidden DENY (powertrain denied even when listed in mandate capabilities)"
+else
+    fail "Expected vehicle_forbidden_domain DENY for powertrain. Got: $RESULT"
+fi
+
+# ═══════════════════════════════════════════════════
 section "SUMMARY"
 # ═══════════════════════════════════════════════════
 
