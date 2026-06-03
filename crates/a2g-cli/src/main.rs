@@ -700,6 +700,15 @@ fn cmd_sign(
     // Validate TTL
     validate_ttl(ttl_hours)?;
 
+    // Require an explicit signing mode — silent no-verification is not allowed
+    if proposal_path.is_none() && !skip_proposal {
+        return Err(
+            "signing requires either --proposal <file> or --skip-proposal; \
+             the silent backwards-compatible mode has been removed"
+                .into(),
+        );
+    }
+
     let mandate_str = std::fs::read_to_string(mandate_path)?;
     let key_hex = std::fs::read_to_string(key_path)?.trim().to_string();
 
@@ -738,12 +747,9 @@ fn cmd_sign(
             println!("  proposal:    {}", &prop.proposal_hash[..16]);
             println!("  status:      {}", prop.status);
         }
-    } else if skip_proposal {
-        if output_format != "json" {
-            eprintln!("WARNING: signing without approved proposal (governance exception)");
-        }
-    } else if output_format != "json" {
-        println!("NOTE: signing without proposal verification (backwards compatible mode)");
+    } else {
+        // skip_proposal is true — emit governance-exception warning
+        eprintln!("WARNING: signing without approved proposal (governance exception)");
     }
 
     let signed = mandate::sign_mandate(&mandate_str, &key_hex, ttl_hours)?;
@@ -2040,5 +2046,150 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max - 1).collect();
         format!("{}…", truncated)
+    }
+}
+
+#[cfg(test)]
+mod sign_policy_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    fn dummy_path() -> PathBuf {
+        PathBuf::from("/nonexistent/dummy")
+    }
+
+    // 1. Neither --proposal nor --skip-proposal → hard error before any I/O
+    #[test]
+    fn test_bare_sign_errors() {
+        let err = cmd_sign(
+            &dummy_path(),
+            &dummy_path(),
+            24,
+            None,
+            false,
+            "text",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--proposal") && msg.contains("--skip-proposal"),
+            "error must mention both flags, got: {msg}"
+        );
+    }
+
+    // 2. --skip-proposal succeeds when mandate + key files exist
+    #[test]
+    fn test_skip_proposal_succeeds() {
+        let dir = tempdir().unwrap();
+
+        // Generate a keypair and write the secret key
+        let (did, secret_hex, pubkey_hex) = a2g_core::identity::generate_agent_keypair();
+        let key_path = dir.path().join("agent.secret.key");
+        std::fs::write(&key_path, &secret_hex).unwrap();
+
+        // Write a minimal unsigned mandate TOML
+        let mandate_toml = format!(
+            r#"[mandate]
+version = "1.0"
+agent_did = "{did}"
+agent_name = "test-agent"
+issuer = "{did}"
+issued_at = "2025-01-01T00:00:00Z"
+expires_at = "2099-01-01T00:00:00Z"
+mandate_hash = ""
+signature = ""
+signer_pubkey = "{pubkey_hex}"
+proposal_hash = ""
+
+[capabilities]
+tools = ["read_file"]
+
+[boundaries]
+fs_allow = ["/data"]
+fs_deny = []
+net_allow = []
+net_deny = []
+cmd_allow = []
+cmd_deny = []
+
+[limits]
+max_calls_per_minute = 60
+max_payload_bytes = 1048576
+"#
+        );
+        let mandate_path = dir.path().join("agent.mandate.toml");
+        std::fs::write(&mandate_path, &mandate_toml).unwrap();
+
+        let result = cmd_sign(&mandate_path, &key_path, 24, None, true, "text");
+        assert!(result.is_ok(), "skip-proposal sign failed: {:?}", result);
+    }
+
+    // 3. --proposal with a valid approved proposal succeeds
+    #[test]
+    fn test_proposal_sign_succeeds() {
+        use sha2::{Digest, Sha256};
+
+        let dir = tempdir().unwrap();
+
+        let (did, secret_hex, pubkey_hex) = a2g_core::identity::generate_agent_keypair();
+        let key_path = dir.path().join("sov.secret.key");
+        std::fs::write(&key_path, &secret_hex).unwrap();
+
+        let mandate_toml = format!(
+            r#"[mandate]
+version = "1.0"
+agent_did = "{did}"
+agent_name = "test-agent"
+issuer = "{did}"
+issued_at = "2025-01-01T00:00:00Z"
+expires_at = "2099-01-01T00:00:00Z"
+mandate_hash = ""
+signature = ""
+signer_pubkey = "{pubkey_hex}"
+proposal_hash = ""
+
+[capabilities]
+tools = ["read_file"]
+
+[boundaries]
+fs_allow = ["/data"]
+fs_deny = []
+net_allow = []
+net_deny = []
+cmd_allow = []
+cmd_deny = []
+
+[limits]
+max_calls_per_minute = 60
+max_payload_bytes = 1048576
+"#
+        );
+        let mandate_path = dir.path().join("agent.mandate.toml");
+        std::fs::write(&mandate_path, &mandate_toml).unwrap();
+
+        // Build a matching approved proposal with all required fields
+        let mandate_hash = hex::encode(Sha256::digest(mandate_toml.as_bytes()));
+        let proposal_hash = format!("prop-{}", &mandate_hash[..16]);
+        let proposal_json = serde_json::json!({
+            "proposal_id": "pid-unit-test",
+            "proposal_hash": proposal_hash,
+            "proposer_did": did,
+            "proposal_name": "Test Proposal",
+            "mandate_body": mandate_toml,
+            "mandate_hash": mandate_hash,
+            "justification": "unit test",
+            "risk_level": "Low",
+            "required_approvals": 1,
+            "status": "Approved",
+            "created_at": "2025-01-01T00:00:00Z",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "reviews": [],
+        });
+        let prop_path = dir.path().join("proposal.json");
+        std::fs::write(&prop_path, serde_json::to_string_pretty(&proposal_json).unwrap()).unwrap();
+
+        let result = cmd_sign(&mandate_path, &key_path, 24, Some(prop_path), false, "text");
+        assert!(result.is_ok(), "proposal sign failed: {:?}", result);
     }
 }
