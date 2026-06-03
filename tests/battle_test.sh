@@ -74,6 +74,14 @@ else
     pass "Rejected TTL=99999"
 fi
 
+# Bare sign (no --proposal and no --skip-proposal) must now error — no silent default
+ERR_MSG=$($A2G sign --mandate "$MANDATE" --key "$SOV_KEY" --ttl 4 2>&1 || true)
+if echo "$ERR_MSG" | grep -q "\-\-proposal" && echo "$ERR_MSG" | grep -q "\-\-skip-proposal"; then
+    pass "Bare sign rejected with guidance message"
+else
+    fail "Bare sign should error mentioning --proposal and --skip-proposal. Got: $ERR_MSG"
+fi
+
 # Empty tool name
 if $A2G enforce --mandate "$MANDATE" --tool "" --ledger "$LEDGER" 2>/dev/null; then
     fail "Should reject empty tool"

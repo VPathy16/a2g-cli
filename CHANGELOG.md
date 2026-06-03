@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Breaking
+
+- `a2g sign` without `--proposal` or `--skip-proposal` now exits non-zero with a guidance message
+  instead of silently signing in backwards-compatible mode. Callers must supply one of:
+  - `--proposal <file>` — full governance verification (proposal hash, status, expiry)
+  - `--skip-proposal` — explicit governance exception with a stderr warning
+
 ## [0.1.0] - 2026-03-29
 
 ### Added
