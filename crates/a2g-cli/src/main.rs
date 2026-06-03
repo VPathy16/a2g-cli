@@ -1185,7 +1185,10 @@ fn cmd_audit(
             .collect();
         println!("{}", serde_json::to_string_pretty(&entries_json)?);
     } else {
-        println!("{:<6} {:<8} {:<20} {:<16} timestamp", "seq", "decision", "agent", "tool");
+        println!(
+            "{:<6} {:<8} {:<20} {:<16} timestamp",
+            "seq", "decision", "agent", "tool"
+        );
         println!("{}", "-".repeat(80));
 
         for e in &entries {
@@ -1493,7 +1496,10 @@ fn cmd_authority_log(
             .collect();
         println!("{}", serde_json::to_string_pretty(&entries_json)?);
     } else {
-        println!("{:<6} {:<22} {:<20} {:<30} timestamp", "seq", "event", "actor", "action");
+        println!(
+            "{:<6} {:<22} {:<20} {:<30} timestamp",
+            "seq", "event", "actor", "action"
+        );
         println!("{}", "-".repeat(100));
 
         for e in &entries {
