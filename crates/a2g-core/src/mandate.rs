@@ -367,6 +367,37 @@ pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, Box<dyn std::err
     })
 }
 
+/// Verify only the ed25519 signature on a mandate — no TTL check.
+///
+/// Used by `decide()` so that the TTL check can be performed with an
+/// injected clock rather than `Utc::now()` called inside here.
+pub fn verify_signature(mandate_str: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mandate: Mandate = toml::from_str(mandate_str)?;
+    let sig = mandate.signature.as_ref().ok_or("mandate is unsigned")?;
+    if sig.algorithm != "ed25519" {
+        return Err(format!("unsupported algorithm: {}", sig.algorithm).into());
+    }
+    let mut m = mandate;
+    let sig_clone = m.signature.take().unwrap();
+    let body_str = toml::to_string_pretty(&m)?;
+    let body_to_hash = format!("MANDATE:{}", body_str);
+    let body_hash = Sha256::digest(body_to_hash.as_bytes());
+    let pubkey_bytes = hex::decode(&sig_clone.issuer_pubkey)?;
+    let pubkey_arr: [u8; 32] = pubkey_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "invalid public key length")?;
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_arr)?;
+    let sig_bytes = hex::decode(&sig_clone.signature)?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "invalid signature length")?;
+    let signature = Signature::from_bytes(&sig_arr);
+    verifying_key.verify(&body_hash, &signature)?;
+    Ok(())
+}
+
 /// Parse a mandate from TOML string
 pub fn parse_mandate(mandate_str: &str) -> Result<Mandate, Box<dyn std::error::Error>> {
     let mandate: Mandate = toml::from_str(mandate_str)?;

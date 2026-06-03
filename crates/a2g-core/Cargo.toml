@@ -5,6 +5,11 @@ edition = "2021"
 description = "Deterministic governance engine for autonomous AI agents (no I/O, no SQLite)"
 license = "MIT"
 
+[features]
+# std is on by default. Disable for no_std exploration (blocked — see docs/no_std-blockers.md).
+default = ["std"]
+std = []
+
 [dependencies]
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
@@ -19,4 +24,9 @@ chrono = { workspace = true }
 regex = { workspace = true }
 
 [dev-dependencies]
-# No extra dev deps needed — tests use an in-process TestLedger
+# TestLedger is in-process; criterion for per-call latency benchmarks
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "decide"
+harness = false
