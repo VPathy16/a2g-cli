@@ -1,23 +1,28 @@
 # In-Cabin Assistant Mandate — Reference Profile
 #
 # This mandate governs a voice-activated in-cabin AI agent. It demonstrates
-# the vehicle capability taxonomy (ADR-0005):
+# the vehicle capability taxonomy (ADR-0005) expressed with real AAOS
+# VehicleProperty symbolic names (ADR-0006).
 #
-#   Comfort    → ALLOW unconditionally (climate, seat, lighting, media)
-#   Convenience→ ALLOW with light gating (navigation, phone)
-#   Sensitive  → ESCALATE by default; additionally state-gated (Park + stopped)
+#   Comfort    → ALLOW unconditionally (HVAC, seat, lighting, display)
+#   Convenience→ ALLOW with light gating (navigation audio)
+#   Sensitive  → ESCALATE to human-in-the-loop; also state-gated (Park + stopped)
 #                Listed in both [capabilities] and [escalation]
-#   Forbidden  → Hard DENY in the engine — never listed here
+#   Forbidden  → Hard DENY in the engine — never list them here.
+#                Examples: CRUISE_CONTROL_COMMAND, EV_STOPPING_MODE, ELECTRONIC_STABILITY_CONTROLS
+#
+# A2G mediates all VHAL access: the agent never calls VehicleProperty APIs
+# directly; every command is checked through the governance pipeline first.
 #
 # Usage:
 #   a2g enforce --mandate in-cabin-assistant.mandate.toml \
-#               --tool vehicle.climate.set_temperature \
-#               --params '{"target_temp_c":22}' \
+#               --tool HVAC_TEMPERATURE_SET \
+#               --params '{"zone":"driver","target_temp_c":22}' \
 #               --ledger cabin.db
 #
 #   a2g enforce --mandate in-cabin-assistant.mandate.toml \
-#               --tool vehicle.window.set_position \
-#               --params '{"position":50}' \
+#               --tool DOOR_LOCK \
+#               --params '{"door_index":0,"lock":false}' \
 #               --vehicle-state '{"speed_kph":0,"gear":"Park","actor":"Driver"}' \
 #               --ledger cabin.db
 #
@@ -37,44 +42,52 @@ issuer = ""
 workspace_root = ""
 
 [capabilities]
-# Explicit allow-list. Anything not listed here is DENIED.
+# Explicit allow-list using AAOS VehicleProperty symbolic names.
+# Anything not listed here is DENIED.
 #
-# Comfort domain (vehicle.climate.*, vehicle.seat.*, vehicle.lighting.*, vehicle.media.*)
-# → always ALLOW; no state gating, no escalation.
+# Comfort domain (HVAC, seat, lighting, display)
+#   → always ALLOW; no state gating, no escalation.
 #
-# Convenience domain (vehicle.navigation.*, vehicle.phone.*)
-# → ALLOW with light gating; not escalated.
+# Convenience domain (navigation audio)
+#   → ALLOW; not escalated.
 #
-# Sensitive domain (vehicle.door.*, vehicle.window.*, vehicle.trunk.*, vehicle.lock.*)
-# → ESCALATE to human-in-the-loop; additionally require Park + speed < 5 km/h.
-#   List these in [escalation].escalate_tools as well.
+# Sensitive domain (window, door, charge port)
+#   → ESCALATE to human-in-the-loop; additionally require Park + speed < 5 km/h.
+#   Listed in [escalation].escalate_tools as well.
 #
-# Forbidden domain (vehicle.powertrain.*, vehicle.chassis.*, vehicle.adas.*,
-#   vehicle.drive.*, vehicle.steering.*, vehicle.braking.*, vehicle.throttle.*)
-# → Hard DENY in the governance engine — never list them here.
+# Read-only telemetry (PERF_VEHICLE_SPEED etc.) may be listed to permit the
+#   agent to observe vehicle state; they resolve to NonVehicle and are never
+#   subject to the Sensitive or Forbidden checks.
+#
+# Forbidden properties (CRUISE_CONTROL_COMMAND, LANE_CENTERING_ASSIST_COMMAND,
+#   ELECTRONIC_STABILITY_CONTROLS, EV_STOPPING_MODE, EV_CHARGE_CURRENT_DRAW_LIMIT,
+#   HANDS_ON_DETECTION_ENABLED) must never appear here — the engine hard-denies
+#   them regardless, but listing them signals intent to bypass governance.
 tools = [
-  # ── Comfort ──────────────────────────────────────────────────────────────
-  "vehicle.climate.set_temperature",
-  "vehicle.climate.set_fan_speed",
-  "vehicle.climate.set_zone",
-  "vehicle.seat.adjust_lumbar",
-  "vehicle.seat.set_position",
-  "vehicle.seat.set_heat",
-  "vehicle.lighting.set_ambient",
-  "vehicle.media.set_volume",
-  "vehicle.media.next_track",
-  "vehicle.media.pause",
-  # ── Convenience ──────────────────────────────────────────────────────────
-  "vehicle.navigation.set_destination",
-  "vehicle.navigation.add_waypoint",
-  "vehicle.phone.call",
-  "vehicle.phone.send_message",
-  # ── Sensitive (also listed in [escalation].escalate_tools) ───────────────
-  "vehicle.window.set_position",
-  "vehicle.window.close_all",
-  "vehicle.door.unlock",
-  "vehicle.trunk.open",
-  "vehicle.lock.lock_all",
+  # ── Comfort: HVAC ──────────────────────────────────────────────────────────
+  "HVAC_TEMPERATURE_SET",        # VehicleProperty 0x15600503 — Comfort; set per-zone target temperature
+  "HVAC_FAN_SPEED",              # VehicleProperty 0x15600500 — Comfort; set fan speed level
+  "HVAC_FAN_DIRECTION",          # VehicleProperty 0x15600501 — Comfort; set airflow direction
+  "HVAC_DEFROSTER",              # VehicleProperty 0x15200511 — Comfort; toggle front/rear defroster
+  "HVAC_AUTO_ON",                # VehicleProperty 0x15200512 — Comfort; toggle automatic climate mode
+  # ── Comfort: Seat adjustment ───────────────────────────────────────────────
+  "SEAT_FORE_AFT_MOVE",          # VehicleProperty 0x15400B87 — Comfort; move seat forward/rearward
+  "SEAT_LUMBAR_FORE_AFT_MOVE",   # VehicleProperty 0x15400B8F — Comfort; adjust lumbar support depth
+  "SEAT_TEMP",                   # VehicleProperty 0x15400B90 — Comfort; set seat heating/cooling level
+  # ── Comfort: Cabin lighting and display ───────────────────────────────────
+  "CABIN_LIGHTS_SWITCH",         # VehicleProperty 0x11400F82 — Comfort; control interior light switch
+  "READING_LIGHTS_SWITCH",       # VehicleProperty 0x15400F85 — Comfort; toggle per-zone reading lights
+  "DISPLAY_BRIGHTNESS",          # VehicleProperty 0x11400F1B — Comfort; set infotainment display brightness
+  # ── Convenience: Navigation audio ─────────────────────────────────────────
+  "NAV_VOLUME_GROUP_COMMAND",    # VehicleProperty 0x11400F36 — Convenience; navigation audio volume
+  # ── Telemetry reads (NonVehicle; permitted for state observation) ──────────
+  "PERF_VEHICLE_SPEED",          # VehicleProperty 0x11600207 — NonVehicle; read vehicle speed (m/s)
+  "GEAR_SELECTION",              # VehicleProperty 0x11400400 — NonVehicle; read gear selector position
+  # ── Sensitive (also listed in [escalation].escalate_tools) ────────────────
+  "WINDOW_POS",                  # VehicleProperty 0x13400BC0 — Sensitive; set window position (0=closed)
+  "WINDOW_MOVE",                 # VehicleProperty 0x13400BC1 — Sensitive; command window movement
+  "DOOR_LOCK",                   # VehicleProperty 0x16400F01 — Sensitive; lock or unlock a door
+  "EV_CHARGE_PORT_OPEN",         # VehicleProperty 0x11200EF8 — Sensitive; open/close EV charge port
 ]
 
 [boundaries]
@@ -105,15 +118,14 @@ classification = "internal"
 
 [escalation]
 # Sensitive tools require human-in-the-loop approval AND vehicle state gating.
-# The governance engine will emit ESCALATE; the agent must pause and await approval.
-# State gating (Park + speed < 5 km/h) is enforced independently in the engine —
-# a moving-vehicle DENY fires before escalation is reached.
+# The governance engine emits ESCALATE; the agent must pause and await approval.
+# State gating (Park + speed < 5 km/h) is enforced independently — a
+# moving-vehicle DENY fires before escalation is reached.
 escalate_tools = [
-  "vehicle.window.set_position",
-  "vehicle.window.close_all",
-  "vehicle.door.unlock",
-  "vehicle.trunk.open",
-  "vehicle.lock.lock_all",
+  "WINDOW_POS",                  # VehicleProperty 0x13400BC0 — window position; requires Park
+  "WINDOW_MOVE",                 # VehicleProperty 0x13400BC1 — window movement; requires Park
+  "DOOR_LOCK",                   # VehicleProperty 0x16400F01 — door lock/unlock; requires Park
+  "EV_CHARGE_PORT_OPEN",         # VehicleProperty 0x11200EF8 — charge port; requires Park
 ]
 escalate_to = "did:a2g:<supervisor-public-key>"
 escalate_paths = []
