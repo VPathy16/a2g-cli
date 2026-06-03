@@ -1191,7 +1191,10 @@ fn cmd_audit(
             .collect();
         println!("{}", serde_json::to_string_pretty(&entries_json)?);
     } else {
-        println!("{:<6} {:<8} {:<20} {:<16} timestamp", "seq", "decision", "agent", "tool");
+        println!(
+            "{:<6} {:<8} {:<20} {:<16} timestamp",
+            "seq", "decision", "agent", "tool"
+        );
         println!("{}", "-".repeat(80));
 
         for e in &entries {
@@ -1499,7 +1502,10 @@ fn cmd_authority_log(
             .collect();
         println!("{}", serde_json::to_string_pretty(&entries_json)?);
     } else {
-        println!("{:<6} {:<22} {:<20} {:<30} timestamp", "seq", "event", "actor", "action");
+        println!(
+            "{:<6} {:<22} {:<20} {:<30} timestamp",
+            "seq", "event", "actor", "action"
+        );
         println!("{}", "-".repeat(100));
 
         for e in &entries {
@@ -2062,15 +2068,7 @@ mod sign_policy_tests {
     // 1. Neither --proposal nor --skip-proposal → hard error before any I/O
     #[test]
     fn test_bare_sign_errors() {
-        let err = cmd_sign(
-            &dummy_path(),
-            &dummy_path(),
-            24,
-            None,
-            false,
-            "text",
-        )
-        .unwrap_err();
+        let err = cmd_sign(&dummy_path(), &dummy_path(), 24, None, false, "text").unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("--proposal") && msg.contains("--skip-proposal"),
@@ -2187,7 +2185,11 @@ max_payload_bytes = 1048576
             "reviews": [],
         });
         let prop_path = dir.path().join("proposal.json");
-        std::fs::write(&prop_path, serde_json::to_string_pretty(&proposal_json).unwrap()).unwrap();
+        std::fs::write(
+            &prop_path,
+            serde_json::to_string_pretty(&proposal_json).unwrap(),
+        )
+        .unwrap();
 
         let result = cmd_sign(&mandate_path, &key_path, 24, Some(prop_path), false, "text");
         assert!(result.is_ok(), "proposal sign failed: {:?}", result);
