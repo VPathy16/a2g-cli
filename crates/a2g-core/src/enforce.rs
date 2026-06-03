@@ -1001,6 +1001,39 @@ mod tests {
         );
     }
 
+    /// PERF_VEHICLE_SPEED is read-only telemetry (NonVehicle domain): passes the
+    /// forbidden pre-check, and a mandate listing it permits it via step 3.
+    #[test]
+    fn test_vhal_speed_read_permitted() {
+        let signed = cabin_mandate(&["PERF_VEHICLE_SPEED"]);
+        let db = TestLedger;
+        let params = serde_json::json!({});
+        let result = decide(&signed, "PERF_VEHICLE_SPEED", &params, &db, Utc::now()).unwrap();
+        assert_eq!(
+            result.decision,
+            Decision::Allow,
+            "read-only telemetry should be ALLOW, got: {} — {}",
+            result.decision,
+            result.policy_rule
+        );
+    }
+
+    /// CRUISE_CONTROL_COMMAND is Forbidden (ADAS write): hard-denied even when the
+    /// mandate explicitly lists it — forbidden pre-check fires before tool authorization.
+    #[test]
+    fn test_vhal_adas_write_denied_despite_mandate() {
+        let signed = cabin_mandate(&["CRUISE_CONTROL_COMMAND"]);
+        let db = TestLedger;
+        let params = serde_json::json!({});
+        let result = decide(&signed, "CRUISE_CONTROL_COMMAND", &params, &db, Utc::now()).unwrap();
+        assert_eq!(result.decision, Decision::Deny);
+        assert!(
+            result.policy_rule.contains("vehicle_forbidden_domain"),
+            "expected vehicle_forbidden_domain, got: {}",
+            result.policy_rule
+        );
+    }
+
     /// decide() and enforce() produce the same decision for the same mandate.
     #[test]
     fn test_enforce_wraps_decide_consistently() {
