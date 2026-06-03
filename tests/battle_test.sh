@@ -468,6 +468,76 @@ else
 fi
 
 # ═══════════════════════════════════════════════════
+section "SYMLINK BOUNDARY ESCAPE"
+# ═══════════════════════════════════════════════════
+
+# Fresh signed mandate for symlink tests — MANDATE is revoked above, so we
+# create a new agent with a dedicated ledger to avoid rate-limit interference.
+$A2G init --name "symlink-agent" --out "$TEST_DIR" >/dev/null 2>&1
+SYM_MANDATE="$TEST_DIR/symlink-agent.mandate.toml"
+sed -i "s|workspace_root = \".*\"|workspace_root = \"$TEST_DIR\"|" "$SYM_MANDATE"
+SYM_LEDGER="$TEST_DIR/symlink.db"
+$A2G propose --proposer "$SOV_DID" --name "Symlink Agent" --mandate "$SYM_MANDATE" \
+    --justification "Symlink boundary tests" --out "$TEST_DIR/sym-prop.json" \
+    --ledger "$SYM_LEDGER" >/dev/null 2>&1
+$A2G review --proposal "$TEST_DIR/sym-prop.json" --key "$SOV_KEY" \
+    --reviewer-name "Reviewer" --decision approve --reason "Auto" \
+    --ledger "$SYM_LEDGER" >/dev/null 2>&1
+$A2G sign --mandate "$SYM_MANDATE" --key "$SOV_KEY" --ttl 24 \
+    --proposal "$TEST_DIR/sym-prop.json" >/dev/null 2>&1
+
+# Create directories outside the workspace with real files.
+mkdir -p "$TEST_DIR/outside_data"
+echo "restricted content" > "$TEST_DIR/outside_data/payload.txt"
+mkdir -p "$TEST_DIR/outside_dir"
+echo "dir content" > "$TEST_DIR/outside_dir/report.csv"
+
+# Case 1: symlinked file — workspace/evil_link → outside_data/payload.txt
+# Lexically the path is inside workspace; the real target is outside.
+ln -s "$TEST_DIR/outside_data/payload.txt" "$TEST_DIR/workspace/evil_link"
+
+RESULT=$($A2G --output json enforce \
+    --mandate "$SYM_MANDATE" \
+    --tool read_file \
+    --params "{\"path\":\"$TEST_DIR/workspace/evil_link\"}" \
+    --ledger "$SYM_LEDGER" 2>&1 || true)
+if echo "$RESULT" | grep -q '"DENY"'; then
+    pass "Enforce DENY (symlink file escape: workspace/evil_link → outside)"
+else
+    fail "Expected DENY for symlink escape via file. Got: $RESULT"
+fi
+
+# Case 2: symlinked parent directory — workspace/outsidedir → outside_dir/
+# Accessing a real file through the symlinked directory must also be denied.
+ln -s "$TEST_DIR/outside_dir" "$TEST_DIR/workspace/outsidedir"
+
+RESULT=$($A2G --output json enforce \
+    --mandate "$SYM_MANDATE" \
+    --tool read_file \
+    --params "{\"path\":\"$TEST_DIR/workspace/outsidedir/report.csv\"}" \
+    --ledger "$SYM_LEDGER" 2>&1 || true)
+if echo "$RESULT" | grep -q '"DENY"'; then
+    pass "Enforce DENY (symlink dir escape: workspace/outsidedir/ → outside_dir/)"
+else
+    fail "Expected DENY for symlink escape via parent dir. Got: $RESULT"
+fi
+
+# Case 3: real file inside boundary — guard against over-blocking.
+RESULT=$($A2G --output json enforce \
+    --mandate "$SYM_MANDATE" \
+    --tool read_file \
+    --params "{\"path\":\"$TEST_DIR/workspace/reports/q4.csv\"}" \
+    --ledger "$SYM_LEDGER" 2>&1 || true)
+if echo "$RESULT" | grep -q '"ALLOW"'; then
+    pass "Enforce ALLOW (real file inside workspace: no over-blocking)"
+else
+    fail "Expected ALLOW for real file inside workspace after symlink mitigation. Got: $RESULT"
+fi
+
+# Cleanup symlinks (test dir itself is cleaned up by the EXIT trap).
+rm -f "$TEST_DIR/workspace/evil_link" "$TEST_DIR/workspace/outsidedir"
+
+# ═══════════════════════════════════════════════════
 section "SUMMARY"
 # ═══════════════════════════════════════════════════
 
