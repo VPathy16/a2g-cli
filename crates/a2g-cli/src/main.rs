@@ -117,9 +117,12 @@ enum Commands {
         /// TTL in hours (default: 24)
         #[arg(long, default_value = "24")]
         ttl: u64,
-        /// Path to approved proposal JSON (REQUIRED — governance enforcement)
+        /// Optional path to approved proposal JSON (for governance enforcement)
         #[arg(long)]
-        proposal: PathBuf,
+        proposal: Option<PathBuf>,
+        /// Skip proposal verification (governance exception)
+        #[arg(long, default_value = "false")]
+        skip_proposal: bool,
     },
     /// Verify a mandate (signature + TTL + identity)
     Verify {
@@ -408,7 +411,8 @@ fn main() {
             key,
             ttl,
             proposal,
-        } => cmd_sign(&mandate, &key, ttl, &proposal, output_format),
+            skip_proposal,
+        } => cmd_sign(&mandate, &key, ttl, proposal, skip_proposal, output_format),
         Commands::Verify { mandate } => cmd_verify(&mandate, output_format),
         Commands::Enforce {
             mandate,
@@ -686,7 +690,8 @@ fn cmd_sign(
     mandate_path: &PathBuf,
     key_path: &PathBuf,
     ttl_hours: u64,
-    proposal_path: &PathBuf,
+    proposal_path: Option<PathBuf>,
+    skip_proposal: bool,
     output_format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use chrono::DateTime;
@@ -698,36 +703,47 @@ fn cmd_sign(
     let mandate_str = std::fs::read_to_string(mandate_path)?;
     let key_hex = std::fs::read_to_string(key_path)?.trim().to_string();
 
-    // MANDATORY: Load and verify the approved proposal
-    let prop_json = std::fs::read_to_string(proposal_path)?;
-    let prop: proposal::Proposal = serde_json::from_str(&prop_json)?;
+    if let Some(prop_path) = proposal_path {
+        // Load and verify the approved proposal
+        let prop_json = std::fs::read_to_string(&prop_path)?;
+        let prop: proposal::Proposal = serde_json::from_str(&prop_json)?;
 
-    // Check proposal status is "Approved"
-    if prop.status != proposal::ProposalStatus::Approved {
-        return Err(format!("proposal is not approved (status: {})", prop.status).into());
-    }
-
-    // C1 FIX: Check proposal has not expired
-    if let Ok(expires) = DateTime::parse_from_rfc3339(&prop.expires_at) {
-        if chrono::Utc::now() >= expires {
-            return Err(format!("proposal has expired (expired at {})", prop.expires_at).into());
+        // Check proposal status is "Approved"
+        if prop.status != proposal::ProposalStatus::Approved {
+            return Err(format!("proposal is not approved (status: {})", prop.status).into());
         }
-    }
 
-    // Compute SHA-256 of mandate body
-    let mandate_body_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
+        // C1 FIX: Check proposal has not expired
+        if let Ok(expires) = DateTime::parse_from_rfc3339(&prop.expires_at) {
+            if chrono::Utc::now() >= expires {
+                return Err(
+                    format!("proposal has expired (expired at {})", prop.expires_at).into(),
+                );
+            }
+        }
 
-    // Compare to proposal.mandate_hash — prevents mandate modification after approval
-    if mandate_body_hash != prop.mandate_hash {
-        return Err(
-            "mandate modified after proposal approval: hash mismatch (governance violation)".into(),
-        );
-    }
+        // Compute SHA-256 of mandate body
+        let mandate_body_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
 
-    if output_format != "json" {
-        println!("proposal verified ✓");
-        println!("  proposal:    {}", &prop.proposal_hash[..16]);
-        println!("  status:      {}", prop.status);
+        // Compare to proposal.mandate_hash — prevents mandate modification after approval
+        if mandate_body_hash != prop.mandate_hash {
+            return Err(
+                "mandate modified after proposal approval: hash mismatch (governance violation)"
+                    .into(),
+            );
+        }
+
+        if output_format != "json" {
+            println!("proposal verified ✓");
+            println!("  proposal:    {}", &prop.proposal_hash[..16]);
+            println!("  status:      {}", prop.status);
+        }
+    } else if skip_proposal {
+        if output_format != "json" {
+            eprintln!("WARNING: signing without approved proposal (governance exception)");
+        }
+    } else if output_format != "json" {
+        println!("NOTE: signing without proposal verification (backwards compatible mode)");
     }
 
     let signed = mandate::sign_mandate(&mandate_str, &key_hex, ttl_hours)?;
