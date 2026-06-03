@@ -153,6 +153,9 @@ enum Commands {
         /// Parent receipt hash (from triggering receipt)
         #[arg(long)]
         parent_receipt: Option<String>,
+        /// Vehicle state JSON for vehicle.* capabilities (e.g. {"speed_kph":0,"gear":"Park","actor":"Driver"})
+        #[arg(long)]
+        vehicle_state: Option<String>,
     },
     /// Verify a governance receipt
     Receipt {
@@ -422,6 +425,7 @@ fn main() {
             authority_chain,
             correlation_id,
             parent_receipt,
+            vehicle_state,
         } => cmd_enforce(
             &mandate,
             &tool,
@@ -430,6 +434,7 @@ fn main() {
             authority_chain,
             correlation_id,
             parent_receipt,
+            vehicle_state,
             output_format,
         ),
         Commands::Receipt {
@@ -826,6 +831,7 @@ fn cmd_enforce(
     authority_chain: Option<String>,
     correlation_id: Option<String>,
     parent_receipt: Option<String>,
+    vehicle_state: Option<String>,
     output_format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use sha2::{Digest, Sha256};
@@ -835,7 +841,14 @@ fn cmd_enforce(
     }
 
     let mandate_str = std::fs::read_to_string(mandate_path)?;
-    let params: serde_json::Value = serde_json::from_str(params_json)?;
+    let mut params: serde_json::Value = serde_json::from_str(params_json)?;
+
+    // Merge vehicle state into params so decide() can extract it via extract_vehicle_state()
+    if let Some(vs_json) = vehicle_state {
+        let vs: serde_json::Value = serde_json::from_str(&vs_json)
+            .map_err(|e| format!("invalid --vehicle-state JSON: {}", e))?;
+        params["vehicle_state"] = vs;
+    }
 
     // Initialize ledger
     let db = ledger::Ledger::open(ledger_path)?;

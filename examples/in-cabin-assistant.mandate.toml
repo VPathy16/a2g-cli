@@ -1,0 +1,120 @@
+# In-Cabin Assistant Mandate — Reference Profile
+#
+# This mandate governs a voice-activated in-cabin AI agent. It demonstrates
+# the vehicle capability taxonomy (ADR-0005):
+#
+#   Comfort    → ALLOW unconditionally (climate, seat, lighting, media)
+#   Convenience→ ALLOW with light gating (navigation, phone)
+#   Sensitive  → ESCALATE by default; additionally state-gated (Park + stopped)
+#                Listed in both [capabilities] and [escalation]
+#   Forbidden  → Hard DENY in the engine — never listed here
+#
+# Usage:
+#   a2g enforce --mandate in-cabin-assistant.mandate.toml \
+#               --tool vehicle.climate.set_temperature \
+#               --params '{"target_temp_c":22}' \
+#               --ledger cabin.db
+#
+#   a2g enforce --mandate in-cabin-assistant.mandate.toml \
+#               --tool vehicle.window.set_position \
+#               --params '{"position":50}' \
+#               --vehicle-state '{"speed_kph":0,"gear":"Park","actor":"Driver"}' \
+#               --ledger cabin.db
+#
+# Sign this mandate before use:
+#   a2g sign --mandate in-cabin-assistant.mandate.toml \
+#             --key sovereign.secret.key --ttl 24 --skip-proposal
+
+[mandate]
+version = "0.1.0"
+# Replace with the actual agent DID from `a2g init`
+agent_did = "did:a2g:<agent-public-key>"
+agent_name = "in-cabin-assistant"
+issued_at = ""
+expires_at = ""
+issuer = ""
+# No filesystem workspace needed for vehicle capabilities
+workspace_root = ""
+
+[capabilities]
+# Explicit allow-list. Anything not listed here is DENIED.
+#
+# Comfort domain (vehicle.climate.*, vehicle.seat.*, vehicle.lighting.*, vehicle.media.*)
+# → always ALLOW; no state gating, no escalation.
+#
+# Convenience domain (vehicle.navigation.*, vehicle.phone.*)
+# → ALLOW with light gating; not escalated.
+#
+# Sensitive domain (vehicle.door.*, vehicle.window.*, vehicle.trunk.*, vehicle.lock.*)
+# → ESCALATE to human-in-the-loop; additionally require Park + speed < 5 km/h.
+#   List these in [escalation].escalate_tools as well.
+#
+# Forbidden domain (vehicle.powertrain.*, vehicle.chassis.*, vehicle.adas.*,
+#   vehicle.drive.*, vehicle.steering.*, vehicle.braking.*, vehicle.throttle.*)
+# → Hard DENY in the governance engine — never list them here.
+tools = [
+  # ── Comfort ──────────────────────────────────────────────────────────────
+  "vehicle.climate.set_temperature",
+  "vehicle.climate.set_fan_speed",
+  "vehicle.climate.set_zone",
+  "vehicle.seat.adjust_lumbar",
+  "vehicle.seat.set_position",
+  "vehicle.seat.set_heat",
+  "vehicle.lighting.set_ambient",
+  "vehicle.media.set_volume",
+  "vehicle.media.next_track",
+  "vehicle.media.pause",
+  # ── Convenience ──────────────────────────────────────────────────────────
+  "vehicle.navigation.set_destination",
+  "vehicle.navigation.add_waypoint",
+  "vehicle.phone.call",
+  "vehicle.phone.send_message",
+  # ── Sensitive (also listed in [escalation].escalate_tools) ───────────────
+  "vehicle.window.set_position",
+  "vehicle.window.close_all",
+  "vehicle.door.unlock",
+  "vehicle.trunk.open",
+  "vehicle.lock.lock_all",
+]
+
+[boundaries]
+# Vehicle capabilities do not use filesystem, network, or command params.
+# These sections are left empty for this profile.
+fs_read = []
+fs_write = []
+fs_deny = []
+net_allow = []
+net_deny = []
+cmd_allow = []
+cmd_deny = []
+
+[limits]
+# Comfort and convenience tools are low-risk; a higher rate is appropriate.
+max_calls_per_minute = 120
+max_file_size_bytes = 0
+max_output_tokens = 1024
+max_session_duration_sec = 3600
+
+[jurisdiction]
+# Restrict to operating hours — no automated cabin actions during off-hours.
+# Set to "" for 24/7 operation.
+operating_hours = "06:00-23:00"
+region = ""
+environment = "production"
+classification = "internal"
+
+[escalation]
+# Sensitive tools require human-in-the-loop approval AND vehicle state gating.
+# The governance engine will emit ESCALATE; the agent must pause and await approval.
+# State gating (Park + speed < 5 km/h) is enforced independently in the engine —
+# a moving-vehicle DENY fires before escalation is reached.
+escalate_tools = [
+  "vehicle.window.set_position",
+  "vehicle.window.close_all",
+  "vehicle.door.unlock",
+  "vehicle.trunk.open",
+  "vehicle.lock.lock_all",
+]
+escalate_to = "did:a2g:<supervisor-public-key>"
+escalate_paths = []
+escalate_hosts = []

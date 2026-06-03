@@ -135,6 +135,20 @@ pub fn decide<L: EnforceLedger>(
         ));
     }
 
+    // ── Pre-check: Vehicle Forbidden Domain ──
+    // Hard DENY before any mandate evaluation. No mandate permission, escalation,
+    // or vehicle state can override this — checked before Step 0 (revocation).
+    if crate::vehicle::classify_vehicle_tool(tool) == crate::vehicle::VehicleDomain::Forbidden {
+        return Ok(make_verdict(
+            Decision::Deny,
+            &format!(
+                "vehicle_forbidden_domain: '{}' is in the safety-critical domain \
+                 and cannot be granted by any mandate",
+                tool
+            ),
+        ));
+    }
+
     // ── Step 0: Revocation Check ──
     if ledger.is_revoked(&m.mandate.agent_did, &mandate_hash)? {
         return Ok(make_verdict(
@@ -278,6 +292,19 @@ pub fn decide<L: EnforceLedger>(
                     ),
                 ));
             }
+        }
+    }
+
+    // ── Step 4.5: Vehicle State Gating ──
+    // Only for Sensitive capabilities (door/window/trunk/lock). Comfort and
+    // Convenience are not gated; Forbidden was denied above. Unknown vehicle.*
+    // sub-domains are treated as Sensitive (fail-safe) by classify_vehicle_tool.
+    if crate::vehicle::classify_vehicle_tool(tool) == crate::vehicle::VehicleDomain::Sensitive {
+        let state = crate::vehicle::extract_vehicle_state(params);
+        if let crate::vehicle::StateVerdict::Deny(reason) =
+            crate::vehicle::evaluate_vehicle_state(tool, &state)
+        {
+            return Ok(make_verdict(Decision::Deny, reason));
         }
     }
 
@@ -840,6 +867,138 @@ mod tests {
         let result = decide(&signed, "read_file", &params, &db, just_after).unwrap();
         assert_eq!(result.decision, Decision::Deny);
         assert!(result.policy_rule.contains("jurisdiction_violation"));
+    }
+
+    // ── Vehicle capability tests ──────────────────────────────────────────────
+
+    fn cabin_mandate(tools: &[&str]) -> String {
+        let (did, _, _) = crate::identity::generate_agent_keypair();
+        let (_, secret, _) = crate::identity::generate_agent_keypair();
+        let mut template = crate::mandate::generate_template("cabin-agent", &did);
+        let tools_toml = tools
+            .iter()
+            .map(|t| format!("\"{}\"", t))
+            .collect::<Vec<_>>()
+            .join(", ");
+        template = template.replace(
+            r#"tools = ["read_file", "write_file"]"#,
+            &format!("tools = [{}]", tools_toml),
+        );
+        crate::mandate::sign_mandate(&template, &secret, 24).unwrap()
+    }
+
+    /// Forbidden domain is denied even when the mandate lists the tool in capabilities.
+    #[test]
+    fn test_forbidden_domain_denied_despite_mandate() {
+        let signed = cabin_mandate(&["vehicle.powertrain.start_engine"]);
+        let db = TestLedger;
+        let params = serde_json::json!({});
+        let result = decide(
+            &signed,
+            "vehicle.powertrain.start_engine",
+            &params,
+            &db,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(result.decision, Decision::Deny);
+        assert!(
+            result.policy_rule.contains("vehicle_forbidden_domain"),
+            "expected vehicle_forbidden_domain, got: {}",
+            result.policy_rule
+        );
+    }
+
+    /// Sensitive tool (window) is allowed when Park and speed < 5.
+    #[test]
+    fn test_window_allowed_when_parked() {
+        let signed = cabin_mandate(&["vehicle.window.set_position"]);
+        let db = TestLedger;
+        let params = serde_json::json!({
+            "position": 50,
+            "vehicle_state": {"speed_kph": 0.0, "gear": "Park", "actor": "Driver"}
+        });
+        let result = decide(
+            &signed,
+            "vehicle.window.set_position",
+            &params,
+            &db,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(result.decision, Decision::Allow);
+    }
+
+    /// Sensitive tool (window) is denied when vehicle is moving.
+    #[test]
+    fn test_window_denied_when_moving() {
+        let signed = cabin_mandate(&["vehicle.window.set_position"]);
+        let db = TestLedger;
+        let params = serde_json::json!({
+            "position": 50,
+            "vehicle_state": {"speed_kph": 60.0, "gear": "Drive", "actor": "Driver"}
+        });
+        let result = decide(
+            &signed,
+            "vehicle.window.set_position",
+            &params,
+            &db,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(result.decision, Decision::Deny);
+        assert!(
+            result.policy_rule.contains("vehicle_state_violation"),
+            "expected vehicle_state_violation, got: {}",
+            result.policy_rule
+        );
+    }
+
+    /// Comfort tool (climate) is allowed regardless of speed or actor.
+    #[test]
+    fn test_comfort_allowed_while_moving() {
+        let signed = cabin_mandate(&["vehicle.climate.set_temperature"]);
+        let db = TestLedger;
+        let params = serde_json::json!({
+            "target_temp_c": 22,
+            "vehicle_state": {"speed_kph": 80.0, "gear": "Drive", "actor": "Passenger"}
+        });
+        let result = decide(
+            &signed,
+            "vehicle.climate.set_temperature",
+            &params,
+            &db,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(result.decision, Decision::Allow);
+    }
+
+    /// Sensitive tool with no vehicle_state in params → fail-safe (999 km/h, Drive) → DENY.
+    ///
+    /// Verifies that the classify_vehicle_tool / Step 4.5 path, not string matching,
+    /// drives the gating: even with a mandate that lists the tool, omitting vehicle_state
+    /// triggers VehicleState::fail_safe() and the state gate fires.
+    #[test]
+    fn test_sensitive_no_state_denied_by_failsafe() {
+        let signed = cabin_mandate(&["vehicle.window.set_position"]);
+        let db = TestLedger;
+        // No vehicle_state key in params — extract_vehicle_state returns fail_safe()
+        let params = serde_json::json!({"position": 50});
+        let result = decide(
+            &signed,
+            "vehicle.window.set_position",
+            &params,
+            &db,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(result.decision, Decision::Deny);
+        assert!(
+            result.policy_rule.contains("vehicle_state_violation"),
+            "expected vehicle_state_violation for omitted state, got: {}",
+            result.policy_rule
+        );
     }
 
     /// decide() and enforce() produce the same decision for the same mandate.
