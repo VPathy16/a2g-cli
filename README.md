@@ -1,5 +1,7 @@
 # A2G Protocol
 
+[![CI](https://github.com/VPathy16/a2g-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/VPathy16/a2g-cli/actions/workflows/ci.yml)
+
 **Deterministic governance for autonomous AI agents.**
 
 A2G (Agent-to-Governance) is a Rust CLI that enforces what AI agents can and cannot do — before execution, not after. Every tool call passes through an 8-step cryptographic pipeline that produces an immutable audit trail. Zero LLM calls. Every decision is reproducible, verifiable, and legally auditable.
