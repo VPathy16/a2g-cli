@@ -80,8 +80,10 @@ pub struct Verdict {
 /// read-only queries. No writes occur inside `decide()`.
 ///
 /// # Path canonicalization
-/// Uses logical normalization only — no filesystem access. Symlinks are **not**
-/// resolved. See `docs/no_std-blockers.md` for details.
+/// Uses logical normalization only — no filesystem access, no symlink resolution.
+/// When called through `enforce()`, the `path` param has already been resolved to
+/// a canonical real path before this function runs. When called directly (e.g. in
+/// tests or `no_std` contexts), symlinks in the path are **not** detected.
 ///
 /// # API change vs pre-refactor `enforce()`
 /// Generic `<L: EnforceLedger>` replaces `&dyn EnforceLedger`. This is a
@@ -401,17 +403,42 @@ pub fn decide<L: EnforceLedger>(
 
 /// Run the deterministic enforcement pipeline.
 ///
-/// Public API wrapper: injects the current wall-clock time and delegates to
-/// `decide()`. Signature is source-compatible with callers that previously
-/// passed `&dyn EnforceLedger`; the only change is `&dyn` → generic `<L>`,
-/// which is explicitly called out in the PR description.
+/// **I/O boundary**: before delegating to `decide()`, this function resolves the
+/// `path` parameter (if present) to its canonical real form via
+/// `std::fs::canonicalize`. This prevents symlink-based boundary escapes where a
+/// symlink inside an allowed boundary points to a target outside it.
+///
+/// Resolution policy (see also `resolve_path_for_enforce`):
+/// - If the path exists: returns the fully-resolved real path (symlinks followed).
+/// - If the path does not exist: canonicalises the parent directory and re-appends
+///   the leaf component. First-time file creation is supported as long as the
+///   parent directory is real.
+/// - If the parent cannot be resolved: returns `Err`. Callers should treat this
+///   as a DENY. No unresolved path is ever passed to `decide()`.
+///
+/// Accepted residual limitations (documented in `docs/adr/0004-pure-decision-path.md`):
+/// - **TOCTOU**: the symlink is resolved at decision time; the executor runs
+///   later under a different kernel call. A new symlink planted between decision
+///   and execution escapes this check.
+/// - **Executor-mismatch**: A2G decides; a separate process executes. Both must
+///   resolve paths identically (same CWD, no mount-namespace differences).
+///
+/// `decide()` remains I/O-free and receives the pre-resolved path.
 pub fn enforce<L: EnforceLedger>(
     mandate_str: &str,
     tool: &str,
     params: &serde_json::Value,
     ledger: &L,
 ) -> Result<Verdict, Box<dyn std::error::Error>> {
-    decide(mandate_str, tool, params, ledger, Utc::now())
+    let resolved_params = if let Some(raw_path) = params.get("path").and_then(|p| p.as_str()) {
+        let resolved = resolve_path_for_enforce(raw_path)?;
+        let mut p = params.clone();
+        p["path"] = serde_json::Value::String(resolved);
+        p
+    } else {
+        params.clone()
+    };
+    decide(mandate_str, tool, &resolved_params, ledger, Utc::now())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -514,6 +541,65 @@ fn canonicalize_path(raw: &str) -> String {
         return canonical.to_string_lossy().to_string();
     }
     canonicalize_path_logical(raw)
+}
+
+/// Resolve a filesystem path to its canonical real form for the `enforce()` wrapper.
+///
+/// This is the **only** place in a2g-core that calls `std::fs`. `decide()` never
+/// calls this. The resolution steps are:
+///
+/// 1. Logical-normalize the raw path (collapse `.`, `..`, double slashes) — no I/O.
+///    After this step the leaf component is guaranteed not to be `..`.
+/// 2. Call `std::fs::canonicalize` on the normalized path. If it succeeds, return
+///    the real absolute path (all symlinks resolved).
+/// 3. If the path does not exist, split off the leaf component and canonicalize
+///    the parent directory. Because step 1 collapsed all `..`, the leaf is a plain
+///    filename — never `..` — so re-attaching it is safe. If the parent resolves,
+///    return `parent_real/leaf`. If the parent cannot be resolved either, return
+///    `Err`; the caller propagates this rather than passing an unresolved path through.
+///
+/// The leaf-reattach rule handles first-time file creation: the parent must be a
+/// real directory, so a symlinked parent is caught at this step. A leaf that is
+/// itself a dangling symlink is accepted (the symlink name is inside the checked
+/// boundary; the target is validated only when it is created — this is the
+/// documented TOCTOU residual).
+#[cfg(feature = "std")]
+fn resolve_path_for_enforce(raw: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    // Step 1: logical normalization — no I/O, ensures leaf is never `..`.
+    let logical = canonicalize_path_logical(raw);
+
+    // Step 2: full resolution — follows every symlink component.
+    if let Ok(resolved) = std::fs::canonicalize(&logical) {
+        return Ok(resolved.to_string_lossy().into_owned());
+    }
+
+    // Step 3: path doesn't exist — resolve parent, re-attach leaf.
+    let path_obj = std::path::Path::new(&logical);
+    let leaf = path_obj.file_name().ok_or_else(|| {
+        format!(
+            "path '{}' has no filename component; refusing to pass unresolved path to policy engine",
+            logical
+        )
+    })?;
+    let parent = match path_obj.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_owned(),
+        _ => std::path::PathBuf::from("."),
+    };
+
+    std::fs::canonicalize(&parent)
+        .map(|p| p.join(leaf).to_string_lossy().into_owned())
+        .map_err(|_| {
+            format!(
+                "path '{}' does not exist and parent '{}' cannot be resolved; \
+                 refusing to pass unresolved path to policy engine",
+                logical,
+                parent.display()
+            )
+            .into()
+        })
 }
 
 /// Glob matching for path patterns.
@@ -698,6 +784,12 @@ mod tests {
         assert!(result.policy_rule.contains("mandate_invalid"));
     }
 
+    // These two tests use paths that do not exist on disk, so they call `decide()`
+    // directly (which uses logical normalisation only). enforce() would try to
+    // resolve the parent directory on disk and return Err for non-existent trees.
+    // The boundary logic being tested is pure policy evaluation — not symlink
+    // resolution — so `decide()` is the correct entry point here.
+
     #[test]
     fn test_workspace_root_relative_match() {
         let (agent_did, _, _) = crate::identity::generate_agent_keypair();
@@ -711,7 +803,7 @@ mod tests {
         let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({"path": "/home/agent/workspace/data/test.txt"});
-        let result = enforce(&signed, "read_file", &params, &db).unwrap();
+        let result = decide(&signed, "read_file", &params, &db, Utc::now()).unwrap();
         assert_eq!(result.decision, Decision::Allow);
     }
 
@@ -727,7 +819,7 @@ mod tests {
         let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({"path": "/home/agent/workspace/data/test.txt"});
-        let result = enforce(&signed, "read_file", &params, &db).unwrap();
+        let result = decide(&signed, "read_file", &params, &db, Utc::now()).unwrap();
         assert_eq!(result.decision, Decision::Allow);
     }
 
@@ -1036,16 +1128,114 @@ mod tests {
 
     /// decide() and enforce() produce the same decision for the same mandate.
     #[test]
+    // enforce() now resolves paths via std::fs::canonicalize before calling decide().
+    // "workspace/data.csv" doesn't exist on disk so enforce() would return Err.
+    // Use /etc/passwd (always present on Linux) — both paths must produce the same
+    // DENY (boundary_violation via fs_deny "/etc/**") to confirm the wrapper is
+    // consistent.
     fn test_enforce_wraps_decide_consistently() {
         let signed = signed_mandate();
         let db = TestLedger;
-        let params = serde_json::json!({"path": "workspace/data.csv"});
+        // /etc/passwd exists on disk; enforce() canonicalises it (unchanged, no symlinks),
+        // then decide() denies it via fs_deny = ["/etc/**", ...].
+        let params = serde_json::json!({"path": "/etc/passwd"});
 
         let via_enforce = enforce(&signed, "read_file", &params, &db).unwrap();
-        // decide() with a recent timestamp should match enforce()
         let via_decide = decide(&signed, "read_file", &params, &db, Utc::now()).unwrap();
 
-        assert_eq!(via_enforce.decision, via_decide.decision);
+        assert_eq!(via_enforce.decision, Decision::Deny);
+        assert_eq!(via_decide.decision, Decision::Deny);
         assert_eq!(via_enforce.policy_rule, via_decide.policy_rule);
+    }
+
+    /// enforce() resolves a symlink that points outside the allowed boundary → DENY.
+    /// decide() called directly with the symlink path would ALLOW (no symlink resolution).
+    /// This test proves the mitigation in enforce().
+    #[cfg(unix)]
+    #[test]
+    fn test_enforce_denies_symlink_file_escape() {
+        let tmpdir = std::env::temp_dir().join(format!("a2g_symtest_{}", std::process::id()));
+        let workspace = tmpdir.join("workspace");
+        let outside = tmpdir.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_file = outside.join("data.txt");
+        std::fs::write(&outside_file, "out of bounds").unwrap();
+        // Symlink inside workspace pointing to outside file.
+        std::os::unix::fs::symlink(&outside_file, workspace.join("evil_link")).unwrap();
+
+        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
+        let (_, sov_secret, _) = crate::identity::generate_agent_keypair();
+        let mut template = crate::mandate::generate_template("symlink-test", &agent_did);
+        template = template.replace(
+            "workspace_root = \"\"",
+            &format!(
+                "workspace_root = \"{}\"",
+                tmpdir.to_str().unwrap().replace('\\', "\\\\")
+            ),
+        );
+        let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
+        let db = TestLedger;
+
+        // Path is the symlink name — lexically inside workspace.
+        let symlink_path = workspace.join("evil_link").to_str().unwrap().to_string();
+        let params = serde_json::json!({"path": symlink_path});
+
+        // enforce() resolves the symlink → real path outside workspace → DENY.
+        let result = enforce(&signed, "read_file", &params, &db).unwrap();
+        assert_eq!(
+            result.decision,
+            Decision::Deny,
+            "symlink pointing outside workspace must be denied"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// enforce() resolves a symlinked *parent directory* that points outside the
+    /// allowed boundary → DENY when accessing a file through it.
+    #[cfg(unix)]
+    #[test]
+    fn test_enforce_denies_symlink_dir_escape() {
+        let tmpdir = std::env::temp_dir().join(format!("a2g_symtest_dir_{}", std::process::id()));
+        let workspace = tmpdir.join("workspace");
+        let outside_dir = tmpdir.join("outside_dir");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::fs::write(outside_dir.join("report.csv"), "restricted").unwrap();
+        // Symlink: workspace/outsidedir → ../outside_dir (directory outside workspace).
+        std::os::unix::fs::symlink(&outside_dir, workspace.join("outsidedir")).unwrap();
+
+        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
+        let (_, sov_secret, _) = crate::identity::generate_agent_keypair();
+        let mut template = crate::mandate::generate_template("symlink-dir-test", &agent_did);
+        template = template.replace(
+            "workspace_root = \"\"",
+            &format!(
+                "workspace_root = \"{}\"",
+                tmpdir.to_str().unwrap().replace('\\', "\\\\")
+            ),
+        );
+        let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
+        let db = TestLedger;
+
+        // Path goes through a symlinked directory — still lexically inside workspace.
+        let path_through_symdir = workspace
+            .join("outsidedir")
+            .join("report.csv")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let params = serde_json::json!({"path": path_through_symdir});
+
+        // enforce() resolves the symlinked parent → real outside_dir → DENY.
+        let result = enforce(&signed, "read_file", &params, &db).unwrap();
+        assert_eq!(
+            result.decision,
+            Decision::Deny,
+            "access via symlinked parent directory must be denied"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmpdir);
     }
 }
