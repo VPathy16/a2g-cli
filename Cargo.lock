@@ -6,18 +6,35 @@ version = 4
 name = "a2g"
 version = "0.1.0"
 dependencies = [
+ "a2g-core",
  "bs58",
  "chrono",
  "clap",
  "ed25519-dalek",
  "hex",
  "rand",
- "regex",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "toml",
+ "uuid",
+]
+
+[[package]]
+name = "a2g-core"
+version = "0.1.0"
+dependencies = [
+ "bs58",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "rand",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
  "toml",
  "uuid",
 ]

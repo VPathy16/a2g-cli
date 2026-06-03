@@ -1,0 +1,22 @@
+[package]
+name = "a2g-core"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic governance engine for autonomous AI agents (no I/O, no SQLite)"
+license = "MIT"
+
+[dependencies]
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+bs58 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+# No extra dev deps needed — tests use an in-process TestLedger
