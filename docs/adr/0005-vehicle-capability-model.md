@@ -122,3 +122,21 @@ CLI flag: `--vehicle-state '{"speed_kph":0,"gear":"Park","actor":"Driver"}'` is 
 | Separate forbidden-domain ledger | Adds I/O and complexity; static prefix check is simpler and faster |
 | Passenger-only state gating for windows | Inconsistent with safety model; driver distraction from window operation at speed is equally hazardous |
 | Allow comfort tools without any mandate listing | Breaks the explicit allow-list invariant; consistency is more valuable than UX convenience |
+
+## Deferred / Open Questions
+
+### Data-driven forbidden list
+
+The capability taxonomy and the set of forbidden sub-domains are currently **hardcoded** inside `classify_vehicle_tool()` in `vehicle.rs`. This was a deliberate choice for this iteration:
+
+**Hardcoded (current):**
+- The forbidden list cannot be tampered with at runtime — no config file, database entry, or mandate field can override it.
+- Zero I/O on the hot path; the forbidden check is a pure prefix comparison.
+- Auditing the list requires reading the source code, which is version-controlled.
+
+**Data-driven (candidate future change):**
+- A signed, versioned, externally auditable forbidden list (e.g., a CBOR/JSON document committed to the repo or embedded at build time) would allow OEM-specific taxonomies without recompiling.
+- The list could carry a governance signature, making its provenance verifiable at runtime.
+- Tradeoff: the forbidden list is now a trust input — a compromised signing key or a build process that substitutes the list could silently re-classify a safety-critical sub-domain. This shifts the security boundary from "read the source" to "verify the signing chain."
+
+**Decision:** Defer until there is a concrete multi-OEM requirement. Until then, a recompile is the right gate for any change to the forbidden taxonomy — it forces review and test cycles rather than a config push. When this is revisited, it should be treated as a security-sensitive change and carry the same governance overhead as a mandate format change (proposal + review + ADR update).

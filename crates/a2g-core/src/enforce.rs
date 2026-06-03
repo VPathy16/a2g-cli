@@ -974,6 +974,33 @@ mod tests {
         assert_eq!(result.decision, Decision::Allow);
     }
 
+    /// Sensitive tool with no vehicle_state in params → fail-safe (999 km/h, Drive) → DENY.
+    ///
+    /// Verifies that the classify_vehicle_tool / Step 4.5 path, not string matching,
+    /// drives the gating: even with a mandate that lists the tool, omitting vehicle_state
+    /// triggers VehicleState::fail_safe() and the state gate fires.
+    #[test]
+    fn test_sensitive_no_state_denied_by_failsafe() {
+        let signed = cabin_mandate(&["vehicle.window.set_position"]);
+        let db = TestLedger;
+        // No vehicle_state key in params — extract_vehicle_state returns fail_safe()
+        let params = serde_json::json!({"position": 50});
+        let result = decide(
+            &signed,
+            "vehicle.window.set_position",
+            &params,
+            &db,
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(result.decision, Decision::Deny);
+        assert!(
+            result.policy_rule.contains("vehicle_state_violation"),
+            "expected vehicle_state_violation for omitted state, got: {}",
+            result.policy_rule
+        );
+    }
+
     /// decide() and enforce() produce the same decision for the same mandate.
     #[test]
     fn test_enforce_wraps_decide_consistently() {
