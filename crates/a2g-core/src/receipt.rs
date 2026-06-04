@@ -39,6 +39,10 @@ pub struct Receipt {
     pub correlation_id: String,
     #[serde(default)]
     pub parent_receipt_hash: String,
+    /// Trust basis of vehicle state used when this decision was made (ADR-0007).
+    /// Values: "attested" | "operator_trusted" | "none" | "" (not recorded, legacy)
+    #[serde(default)]
+    pub state_trust: String,
 }
 
 /// Thread-safe storage for the previous receipt hash (chain linking)
@@ -102,6 +106,10 @@ pub fn generate_receipt(verdict: &Verdict) -> Receipt {
             verdict.correlation_id, verdict.parent_receipt_hash
         ));
     }
+    // State trust is always included when set — "none" is distinct from "" (legacy/missing).
+    if !verdict.state_trust.is_empty() {
+        hash_input.push_str(&format!(":state_trust:{}", verdict.state_trust));
+    }
 
     let receipt_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
 
@@ -128,6 +136,7 @@ pub fn generate_receipt(verdict: &Verdict) -> Receipt {
         scope_hash: verdict.scope_hash.clone(),
         correlation_id: verdict.correlation_id.clone(),
         parent_receipt_hash: verdict.parent_receipt_hash.clone(),
+        state_trust: verdict.state_trust.clone(),
     }
 }
 
@@ -167,6 +176,9 @@ pub fn verify_receipt(receipt: &Receipt) -> bool {
             ":{}:{}",
             receipt.correlation_id, receipt.parent_receipt_hash
         ));
+    }
+    if !receipt.state_trust.is_empty() {
+        hash_input.push_str(&format!(":state_trust:{}", receipt.state_trust));
     }
 
     let computed = hex::encode(Sha256::digest(hash_input.as_bytes()));
@@ -229,6 +241,7 @@ mod tests {
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
             pending_approval: None,
+            state_trust: String::new(),
         }
     }
 
@@ -259,6 +272,7 @@ mod tests {
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
             pending_approval: None,
+            state_trust: String::new(),
         };
         init_chain_from_ledger(None);
         let mut rcpt = generate_receipt(&verdict);

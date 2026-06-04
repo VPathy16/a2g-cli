@@ -1,0 +1,15 @@
+[package]
+name = "a2g-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+a2g-core = { path = "../a2g-core" }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[build-dependencies]
+cbindgen = "0.27"

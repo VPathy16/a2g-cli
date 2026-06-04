@@ -78,6 +78,11 @@ pub struct Verdict {
     /// Populated when `decision == PendingApproval` (ADR-0008 Phase 1).
     /// Contains the binding that the Phase 2 `ApprovalGrant` must match.
     pub pending_approval: Option<PendingApprovalBinding>,
+    /// Trust basis of the vehicle state used in this decision (ADR-0007).
+    /// Values: "attested" | "operator_trusted" | "none"
+    /// Recorded in the ledger; auditors can distinguish cryptographically-attested
+    /// decisions from operator-typed ones.
+    pub state_trust: String,
 }
 
 /// Pure enforcement decision — runs the full 8-step pipeline with no I/O.
@@ -163,6 +168,10 @@ pub fn decide_with_approval<L: EnforceLedger>(
     let mandate_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
     let proposal_hash = m.mandate.proposal_hash.clone();
 
+    let early_deny_state_trust = verified_state
+        .map(|vs| vs.trust_basis().as_str().to_string())
+        .unwrap_or_else(|| crate::vehicle::StateTrust::None.as_str().to_string());
+
     let make_early_deny = |rule: &str| -> Verdict {
         Verdict {
             verdict_id: uuid::Uuid::new_v4().to_string(),
@@ -182,6 +191,7 @@ pub fn decide_with_approval<L: EnforceLedger>(
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
             pending_approval: None,
+            state_trust: early_deny_state_trust.clone(),
         }
     };
 
@@ -250,6 +260,11 @@ fn decide_core<L: EnforceLedger>(
     let mandate_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
     let proposal_hash = m.mandate.proposal_hash.clone();
 
+    // Compute state trust basis for audit trail (ADR-0007 follow-up).
+    let state_trust = verified_state
+        .map(|vs| vs.trust_basis().as_str().to_string())
+        .unwrap_or_else(|| crate::vehicle::StateTrust::None.as_str().to_string());
+
     let make_verdict = |decision: Decision, rule: &str| -> Verdict {
         Verdict {
             verdict_id: uuid::Uuid::new_v4().to_string(),
@@ -269,6 +284,7 @@ fn decide_core<L: EnforceLedger>(
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
             pending_approval: None,
+            state_trust: state_trust.clone(),
         }
     };
 
@@ -1583,9 +1599,13 @@ mod tests {
         };
         let attested = crate::vehicle::AttestedVehicleState::sign(state, &key, nonce, now);
 
+        let freshness = crate::vehicle::ATTESTATION_FRESHNESS_MS;
+
         // Valid attestation with correct nonce → Ok
         assert!(
-            attested.verify(&pubkey_hex, now, Some(nonce)).is_ok(),
+            attested
+                .verify(&pubkey_hex, now, freshness, Some(nonce))
+                .is_ok(),
             "valid attestation must verify"
         );
 
@@ -1593,23 +1613,33 @@ mod tests {
         let mut bad_sig = attested.clone();
         bad_sig.signature = "00".repeat(64);
         assert_eq!(
-            bad_sig.verify(&pubkey_hex, now, Some(nonce)).unwrap_err(),
+            bad_sig
+                .verify(&pubkey_hex, now, freshness, Some(nonce))
+                .unwrap_err(),
             crate::vehicle::AttestationError::BadSignature
         );
 
         // Wrong nonce (stale nonce / replay)
         assert_eq!(
             attested
-                .verify(&pubkey_hex, now, Some("wrong-nonce"))
+                .verify(&pubkey_hex, now, freshness, Some("wrong-nonce"))
                 .unwrap_err(),
             crate::vehicle::AttestationError::StaleNonce
         );
 
-        // Stale timestamp: now = attested_at + 1000ms >> MAX_AGE_MS (500ms)
+        // Stale timestamp: age = 1000ms > ATTESTATION_FRESHNESS_MS (500ms)
         let stale_now = now + chrono::Duration::milliseconds(1000);
         assert_eq!(
-            attested.verify(&pubkey_hex, stale_now, None).unwrap_err(),
+            attested
+                .verify(&pubkey_hex, stale_now, freshness, None)
+                .unwrap_err(),
             crate::vehicle::AttestationError::Stale
+        );
+
+        // Custom freshness override: 2000ms window accepts the 1000ms-old state
+        assert!(
+            attested.verify(&pubkey_hex, stale_now, 2000, None).is_ok(),
+            "custom freshness_ms=2000 must accept 1000ms-old state"
         );
     }
 
@@ -1663,6 +1693,167 @@ mod tests {
             v.policy_rule.contains("vehicle_forbidden_domain"),
             "policy rule must identify vehicle_forbidden_domain, got: {}",
             v.policy_rule
+        );
+    }
+
+    // ── Part 1 follow-ups ─────────────────────────────────────────────────────
+
+    /// Phase 2 uses the `request_hash` carried in the `PendingApprovalBinding` (Phase 1
+    /// timestamp), not a freshly-computed hash from the Phase 2 clock.
+    /// Evaluating Phase 2 minutes after Phase 1 must still succeed — the async gap
+    /// between human approval and Phase 2 resolution must not break hash matching.
+    #[test]
+    fn test_phase2_async_gap_matches_carried_binding() {
+        let signed = cabin_escalate_mandate(&["WINDOW_POS"], &["WINDOW_POS"]);
+        let db = TestLedger;
+        let parked =
+            crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
+                speed_kph: 0.0,
+                gear: crate::vehicle::Gear::Park,
+                actor: crate::vehicle::Actor::Driver,
+            });
+        let params = serde_json::json!({});
+
+        // Phase 1 at t1: anchored to mandate validity window (mandate has 24-h TTL from real now)
+        let m: crate::mandate::Mandate = toml::from_str(&signed).unwrap();
+        let expires: DateTime<Utc> = m.mandate.expires_at.parse().unwrap();
+        let t1 = expires - chrono::Duration::hours(1);
+        let v1 = decide(&signed, "WINDOW_POS", &params, &db, t1, Some(&parked)).unwrap();
+        assert_eq!(v1.decision, Decision::PendingApproval);
+        let pending = v1.pending_approval.clone().unwrap();
+
+        // Phase 2 at t2 = t1 + 3 min (within 5-min TTL, but different from t1).
+        // The grant carries the SAME request_hash as the binding from Phase 1.
+        // If Phase 2 recomputed request_hash from t2, matching would fail.
+        let t2 = t1 + chrono::Duration::minutes(3);
+        let approver_key = signing_key_from_hex(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let grant = crate::hitl::ApprovalGrant::new_signed(
+            &pending.binding_id,
+            &pending.request_hash, // carried from Phase 1, NOT recomputed from t2
+            "did:a2g:approver",
+            &approver_key,
+            600,
+            t2,
+            "phase1-receipt",
+        );
+
+        let v2 = decide_with_approval(
+            &signed,
+            "WINDOW_POS",
+            &params,
+            &db,
+            t2,
+            Some(&parked),
+            &pending,
+            &grant,
+        )
+        .unwrap();
+        assert_eq!(
+            v2.decision,
+            Decision::Allow,
+            "Phase 2 must succeed 3 min after Phase 1 — hash matching uses carried binding value"
+        );
+    }
+
+    /// state_trust = "attested" when VerifiedVehicleState was produced by AttestedVehicleState::verify().
+    #[test]
+    fn test_state_trust_attested_recorded() {
+        let (did, _, _) = crate::identity::generate_agent_keypair();
+        let (_, secret, _) = crate::identity::generate_agent_keypair();
+        let mut template = crate::mandate::generate_template("trust-test-attested", &did);
+        template = template.replace(
+            r#"tools = ["read_file", "write_file"]"#,
+            r#"tools = ["HVAC_TEMPERATURE_SET"]"#,
+        );
+        let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
+        let (_, attester_secret, _) = crate::identity::generate_agent_keypair();
+        let attester_key = signing_key_from_hex(&attester_secret);
+        let pubkey_hex = hex::encode(attester_key.verifying_key().to_bytes());
+        let nonce = "test-nonce-attest";
+        let now = Utc::now();
+        let state = crate::vehicle::VehicleState {
+            speed_kph: 0.0,
+            gear: crate::vehicle::Gear::Park,
+            actor: crate::vehicle::Actor::Driver,
+        };
+        let attested = crate::vehicle::AttestedVehicleState::sign(state, &attester_key, nonce, now);
+        let verified = attested
+            .verify(
+                &pubkey_hex,
+                now,
+                crate::vehicle::ATTESTATION_FRESHNESS_MS,
+                Some(nonce),
+            )
+            .unwrap();
+        let db = TestLedger;
+        let v = decide(
+            &signed,
+            "HVAC_TEMPERATURE_SET",
+            &serde_json::json!({}),
+            &db,
+            now,
+            Some(&verified),
+        )
+        .unwrap();
+        assert_eq!(
+            v.state_trust, "attested",
+            "VerifiedVehicleState from verify() must record state_trust=attested"
+        );
+    }
+
+    /// state_trust = "operator_trusted" when VerifiedVehicleState came from from_operator_trusted().
+    #[test]
+    fn test_state_trust_operator_trusted_recorded() {
+        let (did, _, _) = crate::identity::generate_agent_keypair();
+        let (_, secret, _) = crate::identity::generate_agent_keypair();
+        let mut template = crate::mandate::generate_template("trust-test-operator", &did);
+        template = template.replace(
+            r#"tools = ["read_file", "write_file"]"#,
+            r#"tools = ["HVAC_TEMPERATURE_SET"]"#,
+        );
+        let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
+        let state = crate::vehicle::VehicleState {
+            speed_kph: 0.0,
+            gear: crate::vehicle::Gear::Park,
+            actor: crate::vehicle::Actor::Driver,
+        };
+        let verified = crate::vehicle::VerifiedVehicleState::from_operator_trusted(state);
+        let db = TestLedger;
+        let now = Utc::now();
+        let v = decide(
+            &signed,
+            "HVAC_TEMPERATURE_SET",
+            &serde_json::json!({}),
+            &db,
+            now,
+            Some(&verified),
+        )
+        .unwrap();
+        assert_eq!(
+            v.state_trust, "operator_trusted",
+            "from_operator_trusted() must record state_trust=operator_trusted"
+        );
+    }
+
+    /// state_trust = "none" when no verified state is passed (non-vehicle tool, or omission).
+    #[test]
+    fn test_state_trust_none_when_no_state() {
+        let signed = signed_mandate();
+        let db = TestLedger;
+        let v = decide(
+            &signed,
+            "read_file",
+            &serde_json::json!({"path": "workspace/file.txt"}),
+            &db,
+            Utc::now(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            v.state_trust, "none",
+            "None verified_state must record state_trust=none"
         );
     }
 }

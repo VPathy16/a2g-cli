@@ -535,6 +535,31 @@ pub fn extract_vehicle_state(params: &serde_json::Value) -> VehicleState {
 
 // ── Attested Vehicle State (ADR-0007) ────────────────────────────────────────
 
+/// Tracks how vehicle state was attested before reaching `decide()`.
+///
+/// Recorded in `Verdict.state_trust` so auditors can distinguish decisions
+/// made on cryptographically-attested state from those on operator-typed state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateTrust {
+    /// State verified by [`AttestedVehicleState::verify`]: signature + freshness passed.
+    Attested,
+    /// State entered via [`VerifiedVehicleState::from_operator_trusted`] (ADR-0007 §4).
+    /// No cryptographic proof; the operator is accountable for accuracy.
+    OperatorTrusted,
+    /// No vehicle state was supplied; fail-safe was used (or tool is non-vehicle).
+    None,
+}
+
+impl StateTrust {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StateTrust::Attested => "attested",
+            StateTrust::OperatorTrusted => "operator_trusted",
+            StateTrust::None => "none",
+        }
+    }
+}
+
 /// Error conditions when verifying an [`AttestedVehicleState`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttestationError {
@@ -580,10 +605,19 @@ pub struct AttestedVehicleState {
     pub signature: String,
 }
 
-impl AttestedVehicleState {
-    /// Maximum acceptable age for timestamp-based freshness checks (ADR-0007 §Open Questions).
-    pub const MAX_AGE_MS: i64 = 500;
+/// Maximum age in milliseconds for timestamp-based vehicle-state freshness checks.
+///
+/// **Security note**: An attacker who captures a valid `{Park, 0 km/h}` state can replay
+/// it for up to this many milliseconds. A value that is too large reopens the replay window;
+/// a value that is too small causes spurious rejections at high enforcement-path latency.
+///
+/// **Provisional**: 500 ms is a discussion starting-point, not a calibrated value.
+/// OEM deployments should set `freshness_ms` in [`AttestedVehicleState::verify`] based on
+/// their HAL sensor-aggregator update rate and signing-path latency budget.
+/// See ADR-0007 §Open Questions.
+pub const ATTESTATION_FRESHNESS_MS: i64 = 500;
 
+impl AttestedVehicleState {
     /// Sign a `VehicleState` to produce an `AttestedVehicleState`.
     ///
     /// Payload hashed: `"VEHICLE_STATE:<state_json>:<attester_pubkey_hex>:<nonce>:<attested_at>"`.
@@ -610,16 +644,21 @@ impl AttestedVehicleState {
 
     /// Verify the attestation and return a [`VerifiedVehicleState`] on success.
     ///
+    /// `freshness_ms`: maximum acceptable age for timestamp-based freshness checks.
+    /// Pass [`ATTESTATION_FRESHNESS_MS`] for the default; OEM deployments should
+    /// calibrate based on their signing-path latency budget (ADR-0007 §Open Questions).
+    ///
     /// Freshness is checked via:
     /// - **Challenge–response** (`expected_nonce = Some(nonce)`): `nonce` must match exactly.
     /// - **Timestamp-based** (`expected_nonce = None`): `attested_at` must be within
-    ///   [`MAX_AGE_MS`] ms of `now`.
+    ///   `freshness_ms` of `now`.
     ///
     /// Called by the enforcing layer. `decide()` never calls this.
     pub fn verify(
         &self,
         expected_pubkey_hex: &str,
         now: chrono::DateTime<chrono::Utc>,
+        freshness_ms: i64,
         expected_nonce: Option<&str>,
     ) -> Result<VerifiedVehicleState, AttestationError> {
         use ed25519_dalek::Verifier;
@@ -659,12 +698,15 @@ impl AttestedVehicleState {
                     .parse::<chrono::DateTime<chrono::Utc>>()
                     .map_err(|_| AttestationError::Stale)?;
                 let age_ms = (now - attested).num_milliseconds();
-                if !(0..=Self::MAX_AGE_MS).contains(&age_ms) {
+                if !(0..=freshness_ms).contains(&age_ms) {
                     return Err(AttestationError::Stale);
                 }
             }
         }
-        Ok(VerifiedVehicleState::new(self.state.clone()))
+        Ok(VerifiedVehicleState::new(
+            self.state.clone(),
+            StateTrust::Attested,
+        ))
     }
 
     fn payload_hash(
@@ -690,36 +732,47 @@ impl AttestedVehicleState {
 /// raw `VehicleState` is a compile error. Unverified state cannot reach gating
 /// by construction.
 ///
+/// Carries a [`StateTrust`] basis so the ledger can distinguish cryptographically-attested
+/// decisions from operator-typed ones (ADR-0007 follow-up).
+///
 /// ## Interim posture (ADR-0007 §4)
 /// [`from_operator_trusted`][Self::from_operator_trusted] is an explicit escape hatch
 /// for the CLI path before the Secure Gateway exists. Callers are responsible for
 /// supplying accurate state on that path.
 #[derive(Debug)]
-pub struct VerifiedVehicleState(VehicleState);
+pub struct VerifiedVehicleState {
+    state: VehicleState,
+    trust_basis: StateTrust,
+}
 
 impl VerifiedVehicleState {
-    fn new(state: VehicleState) -> Self {
-        VerifiedVehicleState(state)
+    fn new(state: VehicleState, trust_basis: StateTrust) -> Self {
+        VerifiedVehicleState { state, trust_basis }
     }
 
     /// Interim operator-trusted constructor for the CLI path (ADR-0007 §4).
     ///
     /// The operator is responsible for supplying accurate state. This constructor
     /// is expected to be replaced by [`AttestedVehicleState::verify`] once the
-    /// Secure Gateway is deployed.
+    /// Secure Gateway is deployed. Records `StateTrust::OperatorTrusted` in the verdict.
     pub fn from_operator_trusted(state: VehicleState) -> Self {
-        VerifiedVehicleState(state)
+        VerifiedVehicleState::new(state, StateTrust::OperatorTrusted)
     }
 
     /// Test-only bypass — produces a `VerifiedVehicleState` without cryptographic attestation.
     #[cfg(test)]
     pub fn new_for_test(state: VehicleState) -> Self {
-        VerifiedVehicleState(state)
+        VerifiedVehicleState::new(state, StateTrust::Attested)
     }
 
     /// Borrow the underlying `VehicleState`.
     pub fn as_vehicle_state(&self) -> &VehicleState {
-        &self.0
+        &self.state
+    }
+
+    /// The trust basis recorded for this state.
+    pub fn trust_basis(&self) -> StateTrust {
+        self.trust_basis
     }
 }
 
