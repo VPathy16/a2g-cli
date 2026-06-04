@@ -13,9 +13,11 @@
 enum A2gDecision {
     A2G_DECISION_ALLOW = 0,
     A2G_DECISION_DENY = 1,
+    // Maps to `Decision::Expired` in a2g-core: the mandate TTL has elapsed.
     A2G_DECISION_EXPIRED = 2,
     A2G_DECISION_PENDING_APPROVAL = 3,
-    // Returned when a2g-ffi catches a panic or receives invalid input.
+    // Returned when a2g-ffi catches a panic, receives invalid input, or detects
+    // a tampered binding MAC.
     A2G_DECISION_ERROR = -1,
 };
 typedef int32_t A2gDecision;
@@ -44,8 +46,8 @@ typedef struct A2gVerifiedStateHandle A2gVerifiedStateHandle;
 //
 // # Returns
 // An `A2gDecision` integer. On `A2G_DECISION_PENDING_APPROVAL` the binding is
-// accessible via `a2g_verdict_binding_id` / `a2g_verdict_request_hash` on the
-// handle written to `*out_verdict`.
+// accessible via `a2g_verdict_binding_json` on the handle written to `*out_verdict`.
+// The binding JSON is MAC-protected — pass it unmodified to `a2g_decide_with_approval`.
 //
 // `*out_verdict` is always written on return (never NULL). Free with `a2g_verdict_free`.
 //
@@ -65,12 +67,14 @@ A2gDecision a2g_decide(const char *mandate_toml,
 // - `tool`          — same tool used in Phase 1.
 // - `params_json`   — same parameters used in Phase 1.
 // - `state`         — same vehicle state handle used in Phase 1, or NULL.
-// - `binding_json`  — JSON-serialised `PendingApprovalBinding` from Phase 1.
-//   Obtain by calling `a2g_verdict_binding_json` after Phase 1.
+// - `binding_json`  — MAC-protected binding JSON from Phase 1.
+//   Obtain with `a2g_verdict_binding_json`. **Do not modify** — any field
+//   change invalidates the MAC and returns `A2G_DECISION_ERROR`.
 // - `grant_json`    — JSON-serialised `ApprovalGrant` from the human approver.
 //
 // # Returns
-// `A2G_DECISION_ALLOW` on success; `A2G_DECISION_DENY` or `A2G_DECISION_ERROR` on failure.
+// `A2G_DECISION_ALLOW` on success; `A2G_DECISION_DENY` on policy failure;
+// `A2G_DECISION_ERROR` on tampered binding, invalid JSON, or internal error.
 // `*out_verdict` is always written. Free with `a2g_verdict_free`.
 //
 // # Safety
@@ -138,11 +142,12 @@ const char *a2g_verdict_binding_id(const struct A2gVerdictHandle *handle);
 // `handle` must be valid and non-freed.
 const char *a2g_verdict_request_hash(const struct A2gVerdictHandle *handle);
 
-// Returns the Phase 1 `PendingApprovalBinding` as a JSON string when
-// `a2g_verdict_decision` is `A2G_DECISION_PENDING_APPROVAL`; otherwise empty string.
+// Returns the Phase 1 MAC-protected binding JSON when `a2g_verdict_decision` is
+// `A2G_DECISION_PENDING_APPROVAL`; otherwise empty string.
 //
-// Pass this value as `binding_json` to `a2g_decide_with_approval` in Phase 2.
-// The pointer is valid until `a2g_verdict_free` is called.
+// Pass this value **unmodified** as `binding_json` to `a2g_decide_with_approval`.
+// Any modification to the returned string will cause Phase 2 to return
+// `A2G_DECISION_ERROR` (MAC mismatch). The pointer is valid until `a2g_verdict_free`.
 //
 // # Safety
 // `handle` must be valid and non-freed.

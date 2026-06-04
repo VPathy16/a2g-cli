@@ -30,6 +30,8 @@ A new `crates/a2g-ffi` crate is added with `crate-type = ["cdylib", "staticlib"]
 
 **`ESCALATE` is intentionally absent.** The post-#12 decision model uses `PendingApproval`; the FFI ABI is aligned with that.
 
+**`Expired=2` mapping**: `A2G_DECISION_EXPIRED` maps directly to `Decision::Expired` from `a2g-core`. It is returned when `decide_core` reaches `enforce.rs:333` — the `mandate_ttl_exceeded` rule fires when the current time is past the mandate's `expires_at` field. No other code path produces `Decision::Expired`. The host should treat this as a permanent reject for the current mandate instance; reissue with a valid TTL before retrying.
+
 The variant values are **ABI-stable** and must not be reordered. Additions must always be appended.
 
 ### Opaque handles
@@ -55,7 +57,7 @@ A2gDecision a2g_decide(
 
 Runs the full 8-step enforcement pipeline. No I/O; no blocking. `*out_verdict` is always written; never NULL on return.
 
-On `A2G_DECISION_PENDING_APPROVAL`, the binding JSON is available via `a2g_verdict_binding_json`. Pass this to Phase 2 together with the grant.
+On `A2G_DECISION_PENDING_APPROVAL`, the binding JSON is available via `a2g_verdict_binding_json`. Pass it **unmodified** to Phase 2 together with the grant.
 
 ### Phase 2: `a2g_decide_with_approval`
 
@@ -71,7 +73,25 @@ A2gDecision a2g_decide_with_approval(
 );
 ```
 
-Validates the grant and runs Phase 2 enforcement. The `binding_json` must be exactly what was returned by `a2g_verdict_binding_json` in Phase 1; re-computing it at Phase 2 time would break hash matching across the async gap (see ADR-0008).
+Validates the grant and runs Phase 2 enforcement. The `binding_json` must be exactly what was returned by `a2g_verdict_binding_json` in Phase 1; re-computing it at Phase 2 time would break hash matching across the async gap (see ADR-0008). Any field modification invalidates the MAC and returns `A2G_DECISION_ERROR`.
+
+### Phase-2 binding integrity (MAC protection)
+
+The `binding_json` blob that crosses the C ABI between Phase 1 and Phase 2 is **MAC-protected**. This prevents a C host from tampering with binding fields to extend TTLs or redirect escalation targets.
+
+**Mechanism:**
+- A per-process ephemeral `ed25519` key is generated once at first use via `OnceLock<SigningKey>` using `OsRng`. It is never written to disk and never crosses the ABI.
+- On Phase 1 output, the FFI layer computes `"BINDING:{id}:{request_hash}:{escalate_to}:{ttl_unix_secs}"` and signs it with the process key. The signature is appended as `a2g_mac` (hex) in the binding JSON.
+- On Phase 2 re-entry, `verify_and_extract()` deserializes the JSON, recomputes the payload, and verifies the ed25519 signature. If verification fails for any reason (tampered field, truncated signature, foreign JSON), the function returns `A2G_DECISION_ERROR` immediately without calling into `a2g-core`.
+
+**What this prevents:**
+- Extending `ttl_expires_at` to reuse an expired mandate window.
+- Changing `escalate_to` to redirect approval to a different authority.
+- Replaying a binding from a different process (different ephemeral key).
+
+**What this does not prevent:**
+- Replay within the same process before TTL expiry (that is the intended use).
+- The host ignoring a DENY and calling Phase 2 anyway — `a2g-core` enforces the approval hash; Phase 2 cannot succeed without a valid human-signed grant.
 
 ### Key exclusion rationale
 

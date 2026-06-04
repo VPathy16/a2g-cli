@@ -47,6 +47,10 @@ dependencies = [
  "a2g-core",
  "cbindgen",
  "chrono",
+ "ed25519-dalek",
+ "hex",
+ "rand",
+ "serde",
  "serde_json",
 ]
 

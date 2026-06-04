@@ -9,7 +9,11 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 a2g-core = { path = "../a2g-core" }
 serde_json = { workspace = true }
+serde = { workspace = true }
 chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.27"
