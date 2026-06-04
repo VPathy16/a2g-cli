@@ -25,3 +25,31 @@ pub trait EnforceLedger {
         seconds: i64,
     ) -> Result<u64, Box<dyn std::error::Error>>;
 }
+
+/// A no-op ledger that never revokes mandates and has no rate limiting.
+///
+/// Intended for embedded and FFI use cases where mandate management and rate
+/// limiting are implemented by the host process. Records no decisions and
+/// persists nothing.
+///
+/// **Note**: a2g-ffi uses this exclusively. Host processes that need real
+/// revocation or rate-limit enforcement must supply their own `EnforceLedger`.
+pub struct NoopLedger;
+
+impl EnforceLedger for NoopLedger {
+    fn is_revoked(
+        &self,
+        _agent_did: &str,
+        _mandate_hash: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        Ok(false)
+    }
+
+    fn count_recent(
+        &self,
+        _agent_did: &str,
+        _seconds: i64,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        Ok(0)
+    }
+}

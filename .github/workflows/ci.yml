@@ -44,3 +44,30 @@ jobs:
 
       - name: Formatting
         run: cargo fmt --check
+
+      - name: Install cbindgen
+        run: cargo install cbindgen --version "0.27.0" --locked
+
+      - name: Check cbindgen header drift
+        run: |
+          cbindgen --config crates/a2g-ffi/cbindgen.toml --crate a2g-ffi --verify \
+            --output crates/a2g-ffi/include/a2g.h
+          echo "OK: a2g.h is up to date"
+
+      - name: Build C smoke test
+        run: |
+          cargo build -p a2g-ffi --release
+          LIB=target/release
+          cc -I crates/a2g-ffi/include \
+             crates/a2g-ffi/tests/smoke_test.c \
+             -L "$LIB" -la2g_ffi \
+             -Wl,-rpath,"$LIB" \
+             -o smoke_test_bin
+          ./smoke_test_bin
+
+      - name: aarch64 cross-compile check (build only)
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+            cargo build -p a2g-ffi --target aarch64-unknown-linux-gnu

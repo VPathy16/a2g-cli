@@ -1,0 +1,9 @@
+language = "C"
+include_guard = "A2G_H"
+tab_width = 4
+documentation = true
+documentation_style = "c99"
+
+[enum]
+rename_variants = "ScreamingSnakeCase"
+prefix_with_name = true

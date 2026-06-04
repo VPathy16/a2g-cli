@@ -112,3 +112,5 @@ The VHAL HAL signing key must be provisioned into the HAL firmware and its corre
 ### Freshness window duration
 
 The maximum acceptable age for a timestamp-based freshness check (for deployments that cannot use challenge–response) should be configured per OEM. A reasonable starting point for discussion is 500 ms, but the appropriate value depends on the update rate of the HAL sensor aggregator and the latency budget of the enforcement path.
+
+**Implementation note**: `a2g-core` exports `ATTESTATION_FRESHNESS_MS = 500` as a provisional default. This constant is explicitly provisional — it is intentionally placed in an open question rather than a decision. Callers should pass a deployment-specific `freshness_ms` to `AttestedVehicleState::verify()` rather than relying on this default.

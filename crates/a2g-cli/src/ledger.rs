@@ -34,6 +34,8 @@ pub struct LedgerEntry {
     pub scope_hash: String,
     pub correlation_id: String,
     pub parent_receipt_hash: String,
+    /// Trust basis of vehicle state: "attested" | "operator_trusted" | "none" | "" (legacy)
+    pub state_trust: String,
 }
 
 /// A single authority log entry for display
@@ -118,7 +120,8 @@ impl Ledger {
                 authority_level TEXT DEFAULT '',
                 scope_hash     TEXT DEFAULT '',
                 correlation_id TEXT DEFAULT '',
-                parent_receipt_hash TEXT DEFAULT ''
+                parent_receipt_hash TEXT DEFAULT '',
+                state_trust    TEXT DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_agent_did ON decisions(agent_did);
@@ -150,6 +153,7 @@ impl Ledger {
             "ALTER TABLE decisions ADD COLUMN scope_hash TEXT DEFAULT ''",
             "ALTER TABLE decisions ADD COLUMN correlation_id TEXT DEFAULT ''",
             "ALTER TABLE decisions ADD COLUMN parent_receipt_hash TEXT DEFAULT ''",
+            "ALTER TABLE decisions ADD COLUMN state_trust TEXT DEFAULT ''",
         ];
         for sql in &migrations {
             let _ = conn.execute(sql, []); // Ignore "duplicate column" errors
@@ -394,8 +398,8 @@ impl Ledger {
                 policy_hash, timestamp, prev_hash, receipt_hash,
                 mandate_hash, proposal_hash, delegation_chain_hash,
                 issuer_did, authority_level, scope_hash,
-                correlation_id, parent_receipt_hash
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                correlation_id, parent_receipt_hash, state_trust
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 receipt.receipt_id,
                 verdict.verdict_id,
@@ -417,6 +421,7 @@ impl Ledger {
                 receipt.scope_hash,
                 receipt.correlation_id,
                 receipt.parent_receipt_hash,
+                receipt.state_trust,
             ],
         )?;
 
@@ -460,8 +465,8 @@ impl Ledger {
                     policy_hash, timestamp, prev_hash, receipt_hash,
                     mandate_hash, proposal_hash, delegation_chain_hash,
                     issuer_did, authority_level, scope_hash,
-                    correlation_id, parent_receipt_hash
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                    correlation_id, parent_receipt_hash, state_trust
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     r.receipt_id, verdict.verdict_id,
                     verdict.agent_did, verdict.agent_name,
@@ -473,6 +478,7 @@ impl Ledger {
                     r.delegation_chain_hash, r.issuer_did,
                     r.authority_level, r.scope_hash,
                     r.correlation_id, r.parent_receipt_hash,
+                    r.state_trust,
                 ],
             )?;
 
@@ -503,7 +509,7 @@ impl Ledger {
                     decision, policy_rule, timestamp, prev_hash, receipt_hash,
                     mandate_hash, proposal_hash, delegation_chain_hash,
                     issuer_did, authority_level, scope_hash,
-                    correlation_id, parent_receipt_hash
+                    correlation_id, parent_receipt_hash, state_trust
              FROM decisions WHERE 1=1",
         );
         let mut bind_values: Vec<String> = Vec::new();
@@ -548,6 +554,7 @@ impl Ledger {
                     scope_hash: row.get(16)?,
                     correlation_id: row.get(17)?,
                     parent_receipt_hash: row.get(18)?,
+                    state_trust: row.get(19)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -585,7 +592,7 @@ impl Ledger {
                     decision, policy_rule, timestamp, prev_hash, receipt_hash,
                     mandate_hash, proposal_hash, delegation_chain_hash,
                     issuer_did, authority_level, scope_hash,
-                    correlation_id, parent_receipt_hash
+                    correlation_id, parent_receipt_hash, state_trust
              FROM decisions WHERE receipt_id = ?1 OR receipt_hash = ?1 LIMIT 1",
         )?;
         let result = stmt
@@ -610,6 +617,7 @@ impl Ledger {
                     scope_hash: row.get(16)?,
                     correlation_id: row.get(17)?,
                     parent_receipt_hash: row.get(18)?,
+                    state_trust: row.get(19)?,
                 })
             })
             .optional()?;
@@ -679,7 +687,7 @@ impl Ledger {
                     decision, policy_rule, timestamp, prev_hash, receipt_hash,
                     mandate_hash, proposal_hash, delegation_chain_hash,
                     issuer_did, authority_level, scope_hash,
-                    correlation_id, parent_receipt_hash
+                    correlation_id, parent_receipt_hash, state_trust
              FROM decisions
              WHERE agent_did = ?1 AND timestamp >= ?2 AND timestamp <= ?3
              ORDER BY seq ASC",
@@ -707,6 +715,7 @@ impl Ledger {
                     scope_hash: row.get(16)?,
                     correlation_id: row.get(17)?,
                     parent_receipt_hash: row.get(18)?,
+                    state_trust: row.get(19)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -760,6 +769,7 @@ mod tests {
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
             pending_approval: None,
+            state_trust: String::new(),
         }
     }
 

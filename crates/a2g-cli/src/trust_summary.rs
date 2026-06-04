@@ -370,6 +370,7 @@ mod tests {
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
             pending_approval: None,
+            state_trust: String::new(),
         }
     }
 

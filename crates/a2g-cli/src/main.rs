@@ -1054,27 +1054,20 @@ fn cmd_enforce(
             std::process::exit(1);
         }
         enforce::Decision::PendingApproval => {
-            let binding_id = verdict
-                .pending_approval
-                .as_ref()
-                .map(|b| b.binding_id.as_str())
-                .unwrap_or("unknown");
             if output_format == "json" {
                 let output = serde_json::json!({
                     "decision": "PENDING_APPROVAL",
                     "tool": tool,
                     "reason": verdict.policy_rule,
-                    "binding_id": binding_id,
                     "receipt_id": rcpt.receipt_id,
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 println!("PENDING_APPROVAL ⏳");
-                println!("  tool:       {}", tool);
-                println!("  reason:     {}", verdict.policy_rule);
-                println!("  binding_id: {}", binding_id);
-                println!("  receipt:    {}", rcpt.receipt_id);
-                println!("\n  action paused — awaiting human-in-the-loop approval");
+                println!("  tool:    {}", tool);
+                println!("  reason:  {}", verdict.policy_rule);
+                println!("  receipt: {}", rcpt.receipt_id);
+                println!("\n  action paused — awaiting human approval");
             }
             std::process::exit(2);
         }
