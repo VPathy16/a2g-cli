@@ -37,6 +37,10 @@ AAOS-specific naming layer (ADR-0006).
 ## Property Mapping Table
 
 VHAL integer IDs are shown for cross-reference only; A2G uses symbolic names.
+All IDs verified against AOSP `VehiclePropertyIds.java` (master) and
+`hardware/interfaces/automotive/vehicle/2.0/types.hal`; see
+`docs/aaos-vhal-verification.md` for per-property status.
+
 `Access` reflects the AAOS property access mode.  
 `Effective domain` is the A2G domain after applying the access-mode rule:
 `Read`-only entries always resolve to **NonVehicle** (telemetry, not commands).
@@ -46,40 +50,38 @@ VHAL integer IDs are shown for cross-reference only; A2G uses symbolic names.
 | VHAL Property | VHAL ID | Access | Effective Domain | Description |
 |---|---|---|---|---|
 | `HVAC_TEMPERATURE_SET` | 0x15600503 | ReadWrite | Comfort | Set per-zone cabin target temperature |
-| `HVAC_FAN_SPEED` | 0x15600500 | ReadWrite | Comfort | Set HVAC fan speed level |
-| `HVAC_FAN_DIRECTION` | 0x15600501 | ReadWrite | Comfort | Set HVAC airflow direction |
+| `HVAC_FAN_SPEED` | 0x15400500 | ReadWrite | Comfort | Set HVAC fan speed level |
+| `HVAC_FAN_DIRECTION` | 0x15400501 | ReadWrite | Comfort | Set HVAC airflow direction |
 | `HVAC_POWER_ON` | 0x15200510 | ReadWrite | Comfort | Toggle HVAC system power |
-| `HVAC_DEFROSTER` | 0x15200511 | ReadWrite | Comfort | Toggle front/rear defroster |
-| `HVAC_AUTO_ON` | 0x15200512 | ReadWrite | Comfort | Toggle HVAC automatic mode |
+| `HVAC_DEFROSTER` | 0x13200504 | ReadWrite | Comfort | Toggle front/rear defroster |
+| `HVAC_AUTO_ON` | 0x1520050A | ReadWrite | Comfort | Toggle HVAC automatic mode |
 | `HVAC_TEMPERATURE_CURRENT` | 0x15600502 | **Read** | **NonVehicle** | Read current cabin temperature (telemetry) |
+| `HVAC_SEAT_TEMPERATURE` | 0x1540050B | ReadWrite | Comfort | Set seat heating or cooling level |
 
 ### Comfort — Seat Adjustment
 
 | VHAL Property | VHAL ID | Access | Effective Domain | Description |
 |---|---|---|---|---|
-| `SEAT_MEMORY_SELECT` | 0x15400F90 | Write | Comfort | Recall a stored seat memory preset |
-| `SEAT_FORE_AFT_MOVE` | 0x15400B87 | Write | Comfort | Move seat forward or rearward |
-| `SEAT_HEIGHT_MOVE` | 0x15400B8B | Write | Comfort | Raise or lower seat height |
-| `SEAT_BACK_RECLINE_ANGLE_ABS_POS` | 0x15400B89 | ReadWrite | Comfort | Set seatback recline angle |
-| `SEAT_LUMBAR_FORE_AFT_MOVE` | 0x15400B8F | Write | Comfort | Adjust lumbar support depth |
-| `SEAT_HEADREST_ANGLE_MOVE` | 0x15400B95 | Write | Comfort | Adjust headrest angle |
-| `SEAT_TEMP` | 0x15400B90 | ReadWrite | Comfort | Set seat heating or cooling level |
+| `SEAT_MEMORY_SELECT` | 0x15400B80 | Write | Comfort | Recall a stored seat memory preset |
+| `SEAT_FORE_AFT_MOVE` | 0x15400B86 | Write | Comfort | Move seat forward or rearward |
+| `SEAT_HEIGHT_MOVE` | 0x15400B8C | Write | Comfort | Raise or lower seat height |
+| `SEAT_LUMBAR_FORE_AFT_MOVE` | 0x15400B92 | Write | Comfort | Adjust lumbar support depth |
+| `SEAT_HEADREST_ANGLE_MOVE` | 0x15400B98 | Write | Comfort | Adjust headrest angle |
 
 ### Comfort — Cabin Lighting
 
 | VHAL Property | VHAL ID | Access | Effective Domain | Description |
 |---|---|---|---|---|
-| `CABIN_LIGHTS_SWITCH` | 0x11400F82 | ReadWrite | Comfort | Control cabin interior light switch state |
-| `CABIN_LIGHTS_STATE` | 0x11400F81 | **Read** | **NonVehicle** | Read cabin light state (telemetry) |
-| `READING_LIGHTS_SWITCH` | 0x15400F85 | ReadWrite | Comfort | Toggle per-zone reading lights |
-| `DISPLAY_BRIGHTNESS` | 0x11400F1B | ReadWrite | Comfort | Set infotainment display brightness |
+| `CABIN_LIGHTS_SWITCH` | 0x11400F02 | ReadWrite | Comfort | Control cabin interior light switch state |
+| `CABIN_LIGHTS_STATE` | 0x11400F01 | **Read** | **NonVehicle** | Read cabin light state (telemetry) |
+| `READING_LIGHTS_SWITCH` | 0x15400F04 | ReadWrite | Comfort | Toggle per-zone reading lights |
+| `DISPLAY_BRIGHTNESS` | 0x11400A03 | ReadWrite | Comfort | Set infotainment display brightness |
 
 ### Convenience
 
-| VHAL Property | VHAL ID | Access | Effective Domain | Description |
-|---|---|---|---|---|
-| `INFO_DRIVING_STATUS` | 0x11400F25 | **Read** | **NonVehicle** | Read UX restriction / driving-status mask (telemetry) |
-| `NAV_VOLUME_GROUP_COMMAND` | 0x11400F36 | Write | Convenience | Command navigation audio volume group |
+No standard VHAL symbolic names are allocated to the Convenience domain.
+Use the `vehicle.navigation.*` and `vehicle.phone.*` prefix forms to classify
+navigation and telephony tools in mandates.
 
 ### Sensitive — Windows
 
@@ -95,9 +97,9 @@ Default verdict is ESCALATE (human-in-the-loop); state violation fires first.
 
 | VHAL Property | VHAL ID | Access | Effective Domain | Description |
 |---|---|---|---|---|
-| `DOOR_LOCK` | 0x16400F01 | ReadWrite | Sensitive | Lock or unlock a door |
-| `DOOR_MOVE` | 0x16400BD2 | Write | Sensitive | Command powered door open/close movement |
-| `EV_CHARGE_PORT_OPEN` | 0x11200EF8 | ReadWrite | Sensitive | Open or close EV charge port door |
+| `DOOR_LOCK` | 0x16200B02 | ReadWrite | Sensitive | Lock or unlock a door |
+| `DOOR_MOVE` | 0x16400B01 | Write | Sensitive | Command powered door open/close movement |
+| `EV_CHARGE_PORT_OPEN` | 0x1120030A | ReadWrite | Sensitive | Open or close EV charge port door |
 
 ### Telemetry (Read-Only → NonVehicle)
 
@@ -111,7 +113,7 @@ The agent may observe vehicle state but cannot command through read-only propert
 | `PERF_VEHICLE_SPEED_DISPLAY` | 0x11600208 | **Read** | — | Display-filtered (speedometer) speed |
 | `GEAR_SELECTION` | 0x11400400 | **Read** | `VehicleState::gear` | Selected gear position |
 | `CURRENT_GEAR` | 0x11400401 | **Read** | `VehicleState::gear` | Currently engaged gear (may differ during shift) |
-| `ENGINE_RPM` | 0x11600115 | **Read** | — | Engine RPM |
+| `ENGINE_RPM` | 0x11600305 | **Read** | — | Engine RPM |
 | `IGNITION_STATE` | 0x11400409 | **Read** | — | Ignition / engine-running state |
 
 ### Forbidden — ADAS, Propulsion, Chassis Safety (Hard DENY)
@@ -122,12 +124,12 @@ or vehicle state can override this. The check fires before mandate evaluation.
 
 | VHAL Property | VHAL ID | Access | Effective Domain | Description |
 |---|---|---|---|---|
-| `CRUISE_CONTROL_COMMAND` | 0x15400456 | Write | **Forbidden** | Adaptive cruise-control command (ADAS write) |
-| `LANE_CENTERING_ASSIST_COMMAND` | 0x15400467 | Write | **Forbidden** | Lane-centering assist command (ADAS write) |
-| `HANDS_ON_DETECTION_ENABLED` | 0x11200471 | ReadWrite | **Forbidden** | Enable/disable hands-on detection (ADAS safety) |
-| `ELECTRONIC_STABILITY_CONTROLS` | 0x11400407 | ReadWrite | **Forbidden** | Enable/disable ESC (chassis safety) |
-| `EV_STOPPING_MODE` | 0x11400472 | ReadWrite | **Forbidden** | Set one-pedal / creep regen mode (propulsion) |
-| `EV_CHARGE_CURRENT_DRAW_LIMIT` | 0x1540040C | ReadWrite | **Forbidden** | Override max charge current draw (propulsion) |
+| `CRUISE_CONTROL_COMMAND` | 0x11401012 | Write | **Forbidden** | Adaptive cruise-control command (ADAS write) |
+| `LANE_CENTERING_ASSIST_COMMAND` | 0x1140100B | Write | **Forbidden** | Lane-centering assist command (ADAS write) |
+| `HANDS_ON_DETECTION_ENABLED` | 0x11201016 | ReadWrite | **Forbidden** | Enable/disable hands-on detection (ADAS safety) |
+| `ELECTRONIC_STABILITY_CONTROL_ENABLED` | 0x1120040E | ReadWrite | **Forbidden** | Enable/disable ESC (chassis safety) |
+| `EV_STOPPING_MODE` | 0x1140040D | ReadWrite | **Forbidden** | Set one-pedal / creep regen mode (propulsion) |
+| `EV_CHARGE_CURRENT_DRAW_LIMIT` | 0x11600F3F | ReadWrite | **Forbidden** | Override max charge current draw (propulsion) |
 
 ---
 
@@ -170,6 +172,7 @@ lookup is an additive second form — no existing mandate or test is affected.
 
 - ADR-0005: Vehicle Capability Model — `docs/adr/0005-vehicle-capability-model.md`
 - ADR-0006: AAOS VHAL Mapping — `docs/adr/0006-aaos-vhal-mapping.md`
+- Verification record: `docs/aaos-vhal-verification.md`
 - Implementation: `crates/a2g-core/src/vehicle.rs`
 - Example mandate: `examples/in-cabin-assistant.mandate.toml`
 - AAOS VHAL HAL definition: `android.hardware.automotive.vehicle.VehicleProperty` (AOSP)

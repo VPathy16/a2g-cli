@@ -4,8 +4,8 @@
 //!
 //! | Domain | Prefix | VHAL examples | Default | State-gated |
 //! |--------|--------|---------------|---------|-------------|
-//! | Comfort | `vehicle.climate.*`, `vehicle.seat.*`, `vehicle.lighting.*`, `vehicle.media.*` | `HVAC_TEMPERATURE_SET`, `SEAT_MEMORY_SELECT`, `CABIN_LIGHTS_SWITCH` | ALLOW | No |
-//! | Convenience | `vehicle.navigation.*`, `vehicle.phone.*` | `INFO_DRIVING_STATUS`, `NAV_VOLUME_GROUP_COMMAND` | ALLOW | Light only |
+//! | Comfort | `vehicle.climate.*`, `vehicle.seat.*`, `vehicle.lighting.*`, `vehicle.media.*` | `HVAC_TEMPERATURE_SET`, `HVAC_SEAT_TEMPERATURE`, `CABIN_LIGHTS_SWITCH` | ALLOW | No |
+//! | Convenience | `vehicle.navigation.*`, `vehicle.phone.*` | (no standard VHAL names; use `vehicle.navigation.*` / `vehicle.phone.*` prefix form) | ALLOW | Light only |
 //! | Sensitive | `vehicle.door.*`, `vehicle.window.*`, `vehicle.trunk.*`, `vehicle.lock.*` | `DOOR_LOCK`, `WINDOW_POS`, `WINDOW_MOVE`, `EV_CHARGE_PORT_OPEN` | ESCALATE | Yes (park+stopped) |
 //! | Forbidden | `vehicle.powertrain.*`, `vehicle.chassis.*`, `vehicle.adas.*`, `vehicle.drive.*`, `vehicle.steering.*`, `vehicle.braking.*`, `vehicle.throttle.*` | `CRUISE_CONTROL_COMMAND`, `LANE_CENTERING_ASSIST_COMMAND`, `EV_STOPPING_MODE` | hard DENY | N/A — denied before gating |
 //!
@@ -190,11 +190,13 @@ pub struct VhalPropertyMapping {
 /// Property names match the symbolic constants in
 /// `android.hardware.automotive.vehicle.VehicleProperty` (AAOS VHAL HAL definition).
 /// Integer IDs are noted in comments for cross-reference; A2G uses only symbolic names.
+/// All IDs verified against AOSP VehiclePropertyIds.java (master) and
+/// hardware/interfaces/automotive/vehicle/2.0/types.hal; see docs/aaos-vhal-verification.md.
 ///
 /// Read-only entries (telemetry) resolve to `NonVehicle` in `classify_vhal_property()`.
 /// The `domain` field on those rows is the conceptual tier for documentation only.
 pub static VHAL_PROPERTIES: &[VhalPropertyMapping] = &[
-    // ── Comfort: HVAC (VehicleProperty 0x155xxxxx zone) ─────────────────────
+    // ── Comfort: HVAC ────────────────────────────────────────────────────────
     VhalPropertyMapping {
         name: "HVAC_TEMPERATURE_SET", // 0x15600503
         access: VhalAccessMode::ReadWrite,
@@ -202,13 +204,13 @@ pub static VHAL_PROPERTIES: &[VhalPropertyMapping] = &[
         description: "Set per-zone cabin target temperature",
     },
     VhalPropertyMapping {
-        name: "HVAC_FAN_SPEED", // 0x15600500
+        name: "HVAC_FAN_SPEED", // 0x15400500
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Comfort,
         description: "Set HVAC fan speed level",
     },
     VhalPropertyMapping {
-        name: "HVAC_FAN_DIRECTION", // 0x15600501
+        name: "HVAC_FAN_DIRECTION", // 0x15400501
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Comfort,
         description: "Set HVAC airflow direction",
@@ -220,13 +222,13 @@ pub static VHAL_PROPERTIES: &[VhalPropertyMapping] = &[
         description: "Toggle HVAC system power",
     },
     VhalPropertyMapping {
-        name: "HVAC_DEFROSTER", // 0x15200511
+        name: "HVAC_DEFROSTER", // 0x13200504 — WINDOW area, BOOLEAN
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Comfort,
         description: "Toggle front/rear defroster",
     },
     VhalPropertyMapping {
-        name: "HVAC_AUTO_ON", // 0x15200512
+        name: "HVAC_AUTO_ON", // 0x1520050A
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Comfort,
         description: "Toggle HVAC automatic mode",
@@ -237,88 +239,69 @@ pub static VHAL_PROPERTIES: &[VhalPropertyMapping] = &[
         domain: VehicleDomain::Comfort,
         description: "Read current cabin temperature (telemetry; read-only)",
     },
-    // ── Comfort: Seat adjustment (VehicleProperty 0x154xxxxx zone) ──────────
     VhalPropertyMapping {
-        name: "SEAT_MEMORY_SELECT", // 0x15400F90
+        name: "HVAC_SEAT_TEMPERATURE", // 0x1540050B
+        access: VhalAccessMode::ReadWrite,
+        domain: VehicleDomain::Comfort,
+        description: "Set seat heating or cooling level",
+    },
+    // ── Comfort: Seat adjustment ─────────────────────────────────────────────
+    VhalPropertyMapping {
+        name: "SEAT_MEMORY_SELECT", // 0x15400B80
         access: VhalAccessMode::Write,
         domain: VehicleDomain::Comfort,
         description: "Recall a stored seat memory preset",
     },
     VhalPropertyMapping {
-        name: "SEAT_FORE_AFT_MOVE", // 0x15400B87
+        name: "SEAT_FORE_AFT_MOVE", // 0x15400B86
         access: VhalAccessMode::Write,
         domain: VehicleDomain::Comfort,
         description: "Move seat forward or rearward",
     },
     VhalPropertyMapping {
-        name: "SEAT_HEIGHT_MOVE", // 0x15400B8B
+        name: "SEAT_HEIGHT_MOVE", // 0x15400B8C
         access: VhalAccessMode::Write,
         domain: VehicleDomain::Comfort,
         description: "Raise or lower seat height",
     },
     VhalPropertyMapping {
-        name: "SEAT_BACK_RECLINE_ANGLE_ABS_POS", // 0x15400B89
-        access: VhalAccessMode::ReadWrite,
-        domain: VehicleDomain::Comfort,
-        description: "Set seatback recline angle (absolute position)",
-    },
-    VhalPropertyMapping {
-        name: "SEAT_LUMBAR_FORE_AFT_MOVE", // 0x15400B8F
+        name: "SEAT_LUMBAR_FORE_AFT_MOVE", // 0x15400B92
         access: VhalAccessMode::Write,
         domain: VehicleDomain::Comfort,
         description: "Adjust lumbar support depth",
     },
     VhalPropertyMapping {
-        name: "SEAT_HEADREST_ANGLE_MOVE", // 0x15400B95
+        name: "SEAT_HEADREST_ANGLE_MOVE", // 0x15400B98
         access: VhalAccessMode::Write,
         domain: VehicleDomain::Comfort,
         description: "Adjust headrest angle",
     },
+    // ── Comfort: Cabin lighting ──────────────────────────────────────────────
     VhalPropertyMapping {
-        name: "SEAT_TEMP", // 0x15400B90
-        access: VhalAccessMode::ReadWrite,
-        domain: VehicleDomain::Comfort,
-        description: "Set seat heating or cooling level",
-    },
-    // ── Comfort: Cabin lighting (VehicleProperty 0x114xxxxx global) ─────────
-    VhalPropertyMapping {
-        name: "CABIN_LIGHTS_SWITCH", // 0x11400F82
+        name: "CABIN_LIGHTS_SWITCH", // 0x11400F02
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Comfort,
         description: "Control cabin interior light switch state",
     },
     VhalPropertyMapping {
-        name: "CABIN_LIGHTS_STATE", // 0x11400F81 — READ
+        name: "CABIN_LIGHTS_STATE", // 0x11400F01 — READ
         access: VhalAccessMode::Read,
         domain: VehicleDomain::Comfort,
         description: "Read cabin light state (telemetry; read-only)",
     },
     VhalPropertyMapping {
-        name: "READING_LIGHTS_SWITCH", // 0x15400F85
+        name: "READING_LIGHTS_SWITCH", // 0x15400F04
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Comfort,
         description: "Toggle individual reading lights per zone",
     },
     VhalPropertyMapping {
-        name: "DISPLAY_BRIGHTNESS", // 0x11400F1B
+        name: "DISPLAY_BRIGHTNESS", // 0x11400A03
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Comfort,
         description: "Set infotainment display brightness",
     },
-    // ── Convenience: driving status / nav audio ──────────────────────────────
-    VhalPropertyMapping {
-        name: "INFO_DRIVING_STATUS", // 0x11400F25 — READ (UX restrictions)
-        access: VhalAccessMode::Read,
-        domain: VehicleDomain::Convenience,
-        description: "Read UX restriction / driving-status mask (telemetry; read-only)",
-    },
-    VhalPropertyMapping {
-        name: "NAV_VOLUME_GROUP_COMMAND", // 0x11400F36
-        access: VhalAccessMode::Write,
-        domain: VehicleDomain::Convenience,
-        description: "Command navigation audio volume group",
-    },
-    // ── Sensitive: Windows (VehicleProperty 0x134xxxxx zone) ────────────────
+    // ── Sensitive: Windows ───────────────────────────────────────────────────
     VhalPropertyMapping {
         name: "WINDOW_POS", // 0x13400BC0
         access: VhalAccessMode::ReadWrite,
@@ -331,21 +314,21 @@ pub static VHAL_PROPERTIES: &[VhalPropertyMapping] = &[
         domain: VehicleDomain::Sensitive,
         description: "Command continuous window movement (signed velocity)",
     },
-    // ── Sensitive: Doors, trunk, charge port (VehicleProperty 0x164xxxxx) ───
+    // ── Sensitive: Doors and charge port ────────────────────────────────────
     VhalPropertyMapping {
-        name: "DOOR_LOCK", // 0x16400F01
+        name: "DOOR_LOCK", // 0x16200B02 — DOOR area, BOOLEAN
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Sensitive,
         description: "Lock or unlock a door",
     },
     VhalPropertyMapping {
-        name: "DOOR_MOVE", // 0x16400BD2
+        name: "DOOR_MOVE", // 0x16400B01
         access: VhalAccessMode::Write,
         domain: VehicleDomain::Sensitive,
         description: "Command powered door open/close movement",
     },
     VhalPropertyMapping {
-        name: "EV_CHARGE_PORT_OPEN", // 0x11200EF8
+        name: "EV_CHARGE_PORT_OPEN", // 0x1120030A — GLOBAL, BOOLEAN
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Sensitive,
         description: "Open or close EV charge port door",
@@ -379,7 +362,7 @@ pub static VHAL_PROPERTIES: &[VhalPropertyMapping] = &[
         description: "Currently engaged gear (actual, may differ from selected during shift)",
     },
     VhalPropertyMapping {
-        name: "ENGINE_RPM", // 0x11600115 — READ
+        name: "ENGINE_RPM", // 0x11600305 — READ
         access: VhalAccessMode::Read,
         domain: VehicleDomain::NonVehicle,
         description: "Engine RPM (telemetry; read-only)",
@@ -394,37 +377,37 @@ pub static VHAL_PROPERTIES: &[VhalPropertyMapping] = &[
     // These properties control safety-critical vehicle systems.
     // WRITE access is unconditionally DENIED; no mandate can override this.
     VhalPropertyMapping {
-        name: "CRUISE_CONTROL_COMMAND", // 0x15400456
+        name: "CRUISE_CONTROL_COMMAND", // 0x11401012 — GLOBAL, INT32
         access: VhalAccessMode::Write,
         domain: VehicleDomain::Forbidden,
         description: "Write ADAS adaptive cruise-control command (ADAS write — Forbidden)",
     },
     VhalPropertyMapping {
-        name: "LANE_CENTERING_ASSIST_COMMAND", // 0x15400467
+        name: "LANE_CENTERING_ASSIST_COMMAND", // 0x1140100B — GLOBAL, INT32
         access: VhalAccessMode::Write,
         domain: VehicleDomain::Forbidden,
         description: "Write lane-centering assist command (ADAS write — Forbidden)",
     },
     VhalPropertyMapping {
-        name: "HANDS_ON_DETECTION_ENABLED", // 0x11200471
+        name: "HANDS_ON_DETECTION_ENABLED", // 0x11201016 — GLOBAL, BOOLEAN
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Forbidden,
         description: "Enable/disable hands-on detection (ADAS safety override — Forbidden)",
     },
     VhalPropertyMapping {
-        name: "ELECTRONIC_STABILITY_CONTROLS", // 0x11400407
+        name: "ELECTRONIC_STABILITY_CONTROL_ENABLED", // 0x1120040E — GLOBAL, BOOLEAN
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Forbidden,
         description: "Enable/disable electronic stability control (chassis safety — Forbidden)",
     },
     VhalPropertyMapping {
-        name: "EV_STOPPING_MODE", // 0x11400472
+        name: "EV_STOPPING_MODE", // 0x1140040D — GLOBAL, INT32
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Forbidden,
         description: "Set one-pedal/creep drive regen mode (propulsion write — Forbidden)",
     },
     VhalPropertyMapping {
-        name: "EV_CHARGE_CURRENT_DRAW_LIMIT", // 0x1540040C
+        name: "EV_CHARGE_CURRENT_DRAW_LIMIT", // 0x11600F3F — GLOBAL, FLOAT
         access: VhalAccessMode::ReadWrite,
         domain: VehicleDomain::Forbidden,
         description: "Override maximum charge current draw (propulsion write — Forbidden)",
@@ -670,12 +653,16 @@ mod tests {
             classify_vehicle_tool("HVAC_DEFROSTER"),
             VehicleDomain::Comfort
         );
-        // Seat write → Comfort
+        // Seat heating → Comfort (via HVAC_SEAT_TEMPERATURE)
+        assert_eq!(
+            classify_vehicle_tool("HVAC_SEAT_TEMPERATURE"),
+            VehicleDomain::Comfort
+        );
+        // Seat movement write → Comfort
         assert_eq!(
             classify_vehicle_tool("SEAT_MEMORY_SELECT"),
             VehicleDomain::Comfort
         );
-        assert_eq!(classify_vehicle_tool("SEAT_TEMP"), VehicleDomain::Comfort);
         // Lighting write → Comfort
         assert_eq!(
             classify_vehicle_tool("CABIN_LIGHTS_SWITCH"),
@@ -684,14 +671,6 @@ mod tests {
         assert_eq!(
             classify_vehicle_tool("DISPLAY_BRIGHTNESS"),
             VehicleDomain::Comfort
-        );
-    }
-
-    #[test]
-    fn test_classify_vhal_convenience() {
-        assert_eq!(
-            classify_vehicle_tool("NAV_VOLUME_GROUP_COMMAND"),
-            VehicleDomain::Convenience
         );
     }
 
@@ -726,7 +705,7 @@ mod tests {
         );
         // Chassis/propulsion write → Forbidden
         assert_eq!(
-            classify_vehicle_tool("ELECTRONIC_STABILITY_CONTROLS"),
+            classify_vehicle_tool("ELECTRONIC_STABILITY_CONTROL_ENABLED"),
             VehicleDomain::Forbidden
         );
         assert_eq!(
@@ -767,17 +746,13 @@ mod tests {
             classify_vehicle_tool("IGNITION_STATE"),
             VehicleDomain::NonVehicle
         );
-        // Read-only telemetry even when domain is conceptually Comfort/Convenience
+        // Read-only telemetry even when domain is conceptually Comfort
         assert_eq!(
             classify_vehicle_tool("HVAC_TEMPERATURE_CURRENT"),
             VehicleDomain::NonVehicle
         );
         assert_eq!(
             classify_vehicle_tool("CABIN_LIGHTS_STATE"),
-            VehicleDomain::NonVehicle
-        );
-        assert_eq!(
-            classify_vehicle_tool("INFO_DRIVING_STATUS"),
             VehicleDomain::NonVehicle
         );
     }

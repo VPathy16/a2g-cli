@@ -5,11 +5,12 @@
 # VehicleProperty symbolic names (ADR-0006).
 #
 #   Comfort    → ALLOW unconditionally (HVAC, seat, lighting, display)
-#   Convenience→ ALLOW with light gating (navigation audio)
+#   Convenience→ ALLOW with light gating (use vehicle.navigation.* prefix form)
 #   Sensitive  → ESCALATE to human-in-the-loop; also state-gated (Park + stopped)
 #                Listed in both [capabilities] and [escalation]
 #   Forbidden  → Hard DENY in the engine — never list them here.
-#                Examples: CRUISE_CONTROL_COMMAND, EV_STOPPING_MODE, ELECTRONIC_STABILITY_CONTROLS
+#                Examples: CRUISE_CONTROL_COMMAND, EV_STOPPING_MODE,
+#                ELECTRONIC_STABILITY_CONTROL_ENABLED
 #
 # A2G mediates all VHAL access: the agent never calls VehicleProperty APIs
 # directly; every command is checked through the governance pipeline first.
@@ -48,9 +49,6 @@ workspace_root = ""
 # Comfort domain (HVAC, seat, lighting, display)
 #   → always ALLOW; no state gating, no escalation.
 #
-# Convenience domain (navigation audio)
-#   → ALLOW; not escalated.
-#
 # Sensitive domain (window, door, charge port)
 #   → ESCALATE to human-in-the-loop; additionally require Park + speed < 5 km/h.
 #   Listed in [escalation].escalate_tools as well.
@@ -60,34 +58,33 @@ workspace_root = ""
 #   subject to the Sensitive or Forbidden checks.
 #
 # Forbidden properties (CRUISE_CONTROL_COMMAND, LANE_CENTERING_ASSIST_COMMAND,
-#   ELECTRONIC_STABILITY_CONTROLS, EV_STOPPING_MODE, EV_CHARGE_CURRENT_DRAW_LIMIT,
-#   HANDS_ON_DETECTION_ENABLED) must never appear here — the engine hard-denies
-#   them regardless, but listing them signals intent to bypass governance.
+#   ELECTRONIC_STABILITY_CONTROL_ENABLED, EV_STOPPING_MODE,
+#   EV_CHARGE_CURRENT_DRAW_LIMIT, HANDS_ON_DETECTION_ENABLED) must never
+#   appear here — the engine hard-denies them regardless, but listing them
+#   signals intent to bypass governance.
 tools = [
   # ── Comfort: HVAC ──────────────────────────────────────────────────────────
   "HVAC_TEMPERATURE_SET",        # VehicleProperty 0x15600503 — Comfort; set per-zone target temperature
-  "HVAC_FAN_SPEED",              # VehicleProperty 0x15600500 — Comfort; set fan speed level
-  "HVAC_FAN_DIRECTION",          # VehicleProperty 0x15600501 — Comfort; set airflow direction
-  "HVAC_DEFROSTER",              # VehicleProperty 0x15200511 — Comfort; toggle front/rear defroster
-  "HVAC_AUTO_ON",                # VehicleProperty 0x15200512 — Comfort; toggle automatic climate mode
+  "HVAC_FAN_SPEED",              # VehicleProperty 0x15400500 — Comfort; set fan speed level
+  "HVAC_FAN_DIRECTION",          # VehicleProperty 0x15400501 — Comfort; set airflow direction
+  "HVAC_DEFROSTER",              # VehicleProperty 0x13200504 — Comfort; toggle front/rear defroster
+  "HVAC_AUTO_ON",                # VehicleProperty 0x1520050A — Comfort; toggle automatic climate mode
   # ── Comfort: Seat adjustment ───────────────────────────────────────────────
-  "SEAT_FORE_AFT_MOVE",          # VehicleProperty 0x15400B87 — Comfort; move seat forward/rearward
-  "SEAT_LUMBAR_FORE_AFT_MOVE",   # VehicleProperty 0x15400B8F — Comfort; adjust lumbar support depth
-  "SEAT_TEMP",                   # VehicleProperty 0x15400B90 — Comfort; set seat heating/cooling level
+  "SEAT_FORE_AFT_MOVE",          # VehicleProperty 0x15400B86 — Comfort; move seat forward/rearward
+  "SEAT_LUMBAR_FORE_AFT_MOVE",   # VehicleProperty 0x15400B92 — Comfort; adjust lumbar support depth
+  "HVAC_SEAT_TEMPERATURE",       # VehicleProperty 0x1540050B — Comfort; set seat heating/cooling level
   # ── Comfort: Cabin lighting and display ───────────────────────────────────
-  "CABIN_LIGHTS_SWITCH",         # VehicleProperty 0x11400F82 — Comfort; control interior light switch
-  "READING_LIGHTS_SWITCH",       # VehicleProperty 0x15400F85 — Comfort; toggle per-zone reading lights
-  "DISPLAY_BRIGHTNESS",          # VehicleProperty 0x11400F1B — Comfort; set infotainment display brightness
-  # ── Convenience: Navigation audio ─────────────────────────────────────────
-  "NAV_VOLUME_GROUP_COMMAND",    # VehicleProperty 0x11400F36 — Convenience; navigation audio volume
+  "CABIN_LIGHTS_SWITCH",         # VehicleProperty 0x11400F02 — Comfort; control interior light switch
+  "READING_LIGHTS_SWITCH",       # VehicleProperty 0x15400F04 — Comfort; toggle per-zone reading lights
+  "DISPLAY_BRIGHTNESS",          # VehicleProperty 0x11400A03 — Comfort; set infotainment display brightness
   # ── Telemetry reads (NonVehicle; permitted for state observation) ──────────
   "PERF_VEHICLE_SPEED",          # VehicleProperty 0x11600207 — NonVehicle; read vehicle speed (m/s)
   "GEAR_SELECTION",              # VehicleProperty 0x11400400 — NonVehicle; read gear selector position
   # ── Sensitive (also listed in [escalation].escalate_tools) ────────────────
   "WINDOW_POS",                  # VehicleProperty 0x13400BC0 — Sensitive; set window position (0=closed)
   "WINDOW_MOVE",                 # VehicleProperty 0x13400BC1 — Sensitive; command window movement
-  "DOOR_LOCK",                   # VehicleProperty 0x16400F01 — Sensitive; lock or unlock a door
-  "EV_CHARGE_PORT_OPEN",         # VehicleProperty 0x11200EF8 — Sensitive; open/close EV charge port
+  "DOOR_LOCK",                   # VehicleProperty 0x16200B02 — Sensitive; lock or unlock a door
+  "EV_CHARGE_PORT_OPEN",         # VehicleProperty 0x1120030A — Sensitive; open/close EV charge port
 ]
 
 [boundaries]
@@ -124,8 +121,8 @@ classification = "internal"
 escalate_tools = [
   "WINDOW_POS",                  # VehicleProperty 0x13400BC0 — window position; requires Park
   "WINDOW_MOVE",                 # VehicleProperty 0x13400BC1 — window movement; requires Park
-  "DOOR_LOCK",                   # VehicleProperty 0x16400F01 — door lock/unlock; requires Park
-  "EV_CHARGE_PORT_OPEN",         # VehicleProperty 0x11200EF8 — charge port; requires Park
+  "DOOR_LOCK",                   # VehicleProperty 0x16200B02 — door lock/unlock; requires Park
+  "EV_CHARGE_PORT_OPEN",         # VehicleProperty 0x1120030A — charge port; requires Park
 ]
 escalate_to = "did:a2g:<supervisor-public-key>"
 escalate_paths = []
