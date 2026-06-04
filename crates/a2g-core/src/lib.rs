@@ -1,5 +1,6 @@
 pub mod authority;
 pub mod enforce;
+pub mod hitl;
 pub mod identity;
 pub mod ledger;
 pub mod mandate;

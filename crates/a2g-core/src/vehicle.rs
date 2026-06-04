@@ -533,6 +533,196 @@ pub fn extract_vehicle_state(params: &serde_json::Value) -> VehicleState {
         .unwrap_or_else(VehicleState::fail_safe)
 }
 
+// ── Attested Vehicle State (ADR-0007) ────────────────────────────────────────
+
+/// Error conditions when verifying an [`AttestedVehicleState`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum AttestationError {
+    /// ed25519 signature did not verify against the declared attester public key.
+    BadSignature,
+    /// Public key bytes are not a valid ed25519 key.
+    InvalidPubkey,
+    /// Nonce did not match the expected challenge (challenge–response freshness).
+    StaleNonce,
+    /// Attested timestamp is outside the acceptable freshness window.
+    Stale,
+}
+
+impl std::fmt::Display for AttestationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttestationError::BadSignature => write!(f, "attestation signature did not verify"),
+            AttestationError::InvalidPubkey => write!(f, "attester public key is invalid"),
+            AttestationError::StaleNonce => write!(f, "nonce mismatch: replay or stale state"),
+            AttestationError::Stale => write!(f, "state is too old (freshness check failed)"),
+        }
+    }
+}
+
+/// A `VehicleState` paired with an attestation signature and freshness proof.
+///
+/// Produced by the HAL/TEE attesting source. Only the enforcing layer (Secure Gateway)
+/// calls [`verify`][Self::verify]; `decide()` never does. See ADR-0007.
+///
+/// Prevents **spoofing** (signature check) and **replay** (freshness check).
+/// Both must pass — a valid signature on stale state is still rejected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestedVehicleState {
+    /// The vehicle state being attested.
+    pub state: VehicleState,
+    /// Hex-encoded ed25519 public key of the attesting source (HAL, TEE, etc.).
+    pub attester_pubkey: String,
+    /// Challenge nonce issued by the enforcing layer, or a monotonic counter value.
+    pub nonce: String,
+    /// RFC3339 timestamp at which the HAL/TEE produced this bundle.
+    pub attested_at: String,
+    /// Hex-encoded ed25519 signature over the SHA-256 of the attestation payload.
+    pub signature: String,
+}
+
+impl AttestedVehicleState {
+    /// Maximum acceptable age for timestamp-based freshness checks (ADR-0007 §Open Questions).
+    pub const MAX_AGE_MS: i64 = 500;
+
+    /// Sign a `VehicleState` to produce an `AttestedVehicleState`.
+    ///
+    /// Payload hashed: `"VEHICLE_STATE:<state_json>:<attester_pubkey_hex>:<nonce>:<attested_at>"`.
+    /// Used by the HAL/TEE source, the Secure Gateway, and in tests.
+    pub fn sign(
+        state: VehicleState,
+        signing_key: &ed25519_dalek::SigningKey,
+        nonce: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        use ed25519_dalek::Signer;
+        let attester_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+        let attested_at = now.to_rfc3339();
+        let hash = Self::payload_hash(&state, &attester_pubkey, nonce, &attested_at);
+        let sig: ed25519_dalek::Signature = signing_key.sign(&hash);
+        AttestedVehicleState {
+            state,
+            attester_pubkey,
+            nonce: nonce.to_string(),
+            attested_at,
+            signature: hex::encode(sig.to_bytes()),
+        }
+    }
+
+    /// Verify the attestation and return a [`VerifiedVehicleState`] on success.
+    ///
+    /// Freshness is checked via:
+    /// - **Challenge–response** (`expected_nonce = Some(nonce)`): `nonce` must match exactly.
+    /// - **Timestamp-based** (`expected_nonce = None`): `attested_at` must be within
+    ///   [`MAX_AGE_MS`] ms of `now`.
+    ///
+    /// Called by the enforcing layer. `decide()` never calls this.
+    pub fn verify(
+        &self,
+        expected_pubkey_hex: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        expected_nonce: Option<&str>,
+    ) -> Result<VerifiedVehicleState, AttestationError> {
+        use ed25519_dalek::Verifier;
+        if self.attester_pubkey != expected_pubkey_hex {
+            return Err(AttestationError::BadSignature);
+        }
+        let pubkey_bytes =
+            hex::decode(&self.attester_pubkey).map_err(|_| AttestationError::InvalidPubkey)?;
+        let pubkey_arr: [u8; 32] = pubkey_bytes
+            .try_into()
+            .map_err(|_| AttestationError::InvalidPubkey)?;
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
+            .map_err(|_| AttestationError::InvalidPubkey)?;
+        let sig_bytes = hex::decode(&self.signature).map_err(|_| AttestationError::BadSignature)?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| AttestationError::BadSignature)?;
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        let hash = Self::payload_hash(
+            &self.state,
+            &self.attester_pubkey,
+            &self.nonce,
+            &self.attested_at,
+        );
+        verifying_key
+            .verify(&hash, &sig)
+            .map_err(|_| AttestationError::BadSignature)?;
+        match expected_nonce {
+            Some(nonce) => {
+                if self.nonce != nonce {
+                    return Err(AttestationError::StaleNonce);
+                }
+            }
+            None => {
+                let attested = self
+                    .attested_at
+                    .parse::<chrono::DateTime<chrono::Utc>>()
+                    .map_err(|_| AttestationError::Stale)?;
+                let age_ms = (now - attested).num_milliseconds();
+                if !(0..=Self::MAX_AGE_MS).contains(&age_ms) {
+                    return Err(AttestationError::Stale);
+                }
+            }
+        }
+        Ok(VerifiedVehicleState::new(self.state.clone()))
+    }
+
+    fn payload_hash(
+        state: &VehicleState,
+        pubkey_hex: &str,
+        nonce: &str,
+        attested_at: &str,
+    ) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let state_json = serde_json::to_string(state).unwrap_or_default();
+        let payload = format!(
+            "VEHICLE_STATE:{}:{}:{}:{}",
+            state_json, pubkey_hex, nonce, attested_at
+        );
+        Sha256::digest(payload.as_bytes()).to_vec()
+    }
+}
+
+/// Verified vehicle state — proof that state has passed the attestation boundary.
+///
+/// Only constructable via [`AttestedVehicleState::verify`] in production code.
+/// `decide()`'s Step 4.5 accepts only `Option<&VerifiedVehicleState>` — passing
+/// raw `VehicleState` is a compile error. Unverified state cannot reach gating
+/// by construction.
+///
+/// ## Interim posture (ADR-0007 §4)
+/// [`from_operator_trusted`][Self::from_operator_trusted] is an explicit escape hatch
+/// for the CLI path before the Secure Gateway exists. Callers are responsible for
+/// supplying accurate state on that path.
+#[derive(Debug)]
+pub struct VerifiedVehicleState(VehicleState);
+
+impl VerifiedVehicleState {
+    fn new(state: VehicleState) -> Self {
+        VerifiedVehicleState(state)
+    }
+
+    /// Interim operator-trusted constructor for the CLI path (ADR-0007 §4).
+    ///
+    /// The operator is responsible for supplying accurate state. This constructor
+    /// is expected to be replaced by [`AttestedVehicleState::verify`] once the
+    /// Secure Gateway is deployed.
+    pub fn from_operator_trusted(state: VehicleState) -> Self {
+        VerifiedVehicleState(state)
+    }
+
+    /// Test-only bypass — produces a `VerifiedVehicleState` without cryptographic attestation.
+    #[cfg(test)]
+    pub fn new_for_test(state: VehicleState) -> Self {
+        VerifiedVehicleState(state)
+    }
+
+    /// Borrow the underlying `VehicleState`.
+    pub fn as_vehicle_state(&self) -> &VehicleState {
+        &self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

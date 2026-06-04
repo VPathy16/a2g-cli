@@ -228,6 +228,7 @@ mod tests {
             scope_hash: String::new(),
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
+            pending_approval: None,
         }
     }
 
@@ -257,6 +258,7 @@ mod tests {
             scope_hash: String::new(),
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
+            pending_approval: None,
         };
         init_chain_from_ledger(None);
         let mut rcpt = generate_receipt(&verdict);

@@ -759,6 +759,7 @@ mod tests {
             scope_hash: String::new(),
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
+            pending_approval: None,
         }
     }
 

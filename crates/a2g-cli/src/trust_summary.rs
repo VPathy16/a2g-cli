@@ -142,7 +142,10 @@ pub fn compress_window(
 
     let allow_count = decision_counts.get("ALLOW").copied().unwrap_or(0);
     let deny_count = decision_counts.get("DENY").copied().unwrap_or(0);
-    let escalate_count = decision_counts.get("ESCALATE").copied().unwrap_or(0);
+    let escalate_count = decision_counts
+        .get("PENDING_APPROVAL")
+        .copied()
+        .unwrap_or(0);
 
     let compliance_rate = if total > 0 {
         (allow_count as f64 / total as f64) * 100.0
@@ -366,6 +369,7 @@ mod tests {
             scope_hash: String::new(),
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
+            pending_approval: None,
         }
     }
 
@@ -406,14 +410,14 @@ mod tests {
     fn test_compress_mixed_decisions() {
         let db = crate::ledger::Ledger::open(Path::new(":memory:")).unwrap();
 
-        // 3 ALLOW, 1 DENY, 1 ESCALATE
+        // 3 ALLOW, 1 DENY, 1 PENDING_APPROVAL
         for _ in 0..3 {
             let v = make_test_verdict("did:a2g:bob", "read_file", Decision::Allow);
             db.enforce_and_record(&v).unwrap();
         }
         let v = make_test_verdict("did:a2g:bob", "write_file", Decision::Deny);
         db.enforce_and_record(&v).unwrap();
-        let v = make_test_verdict("did:a2g:bob", "exec_cmd", Decision::Escalate);
+        let v = make_test_verdict("did:a2g:bob", "exec_cmd", Decision::PendingApproval);
         db.enforce_and_record(&v).unwrap();
 
         let data = compress_window(
@@ -426,7 +430,7 @@ mod tests {
         assert_eq!(data.total_decisions, 5);
         assert_eq!(*data.decision_counts.get("ALLOW").unwrap(), 3);
         assert_eq!(*data.decision_counts.get("DENY").unwrap(), 1);
-        assert_eq!(*data.decision_counts.get("ESCALATE").unwrap(), 1);
+        assert_eq!(*data.decision_counts.get("PENDING_APPROVAL").unwrap(), 1);
         assert!((data.compliance_rate - 60.0).abs() < 0.01);
         assert!((data.deny_rate - 20.0).abs() < 0.01);
         assert!((data.escalation_rate - 20.0).abs() < 0.01);

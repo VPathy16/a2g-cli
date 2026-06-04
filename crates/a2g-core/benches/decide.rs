@@ -45,7 +45,7 @@ fn bench_decide_allow(c: &mut Criterion) {
 
     c.bench_function("decide_allow (read_file)", |b| {
         b.iter(|| {
-            let verdict = decide(&signed, "read_file", &params, &ledger, now).unwrap();
+            let verdict = decide(&signed, "read_file", &params, &ledger, now, None).unwrap();
             // read_file is in the template's tools list → ALLOW
             std::hint::black_box(verdict);
         });
@@ -60,7 +60,7 @@ fn bench_decide_deny_unknown_tool(c: &mut Criterion) {
 
     c.bench_function("decide_deny (unknown_tool)", |b| {
         b.iter(|| {
-            let verdict = decide(&signed, "delete_database", &params, &ledger, now).unwrap();
+            let verdict = decide(&signed, "delete_database", &params, &ledger, now, None).unwrap();
             std::hint::black_box(verdict);
         });
     });
