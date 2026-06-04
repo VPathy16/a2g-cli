@@ -8,6 +8,9 @@
 //!   Generic over `L: EnforceLedger` (static dispatch, vtable-free).
 //! - `enforce()`: Public API wrapper. Injects `Utc::now()`, delegates to `decide()`.
 //!   Same external signature as before except `&dyn` → `<L: EnforceLedger>`.
+//! - `decide_with_approval()`: Phase 2 of the HITL state machine (ADR-0008).
+//!   Validates a signed `ApprovalGrant` against a `PendingApprovalBinding`, then
+//!   runs the full pipeline with the escalation trigger removed.
 //!
 //! ## Allocation notes — non-removable on the current path
 //!
@@ -21,9 +24,13 @@
 //! - `canonicalize_path_logical`: one `Vec<&str>` + `join()` per path check.
 //! - `format!()` calls in policy-rule strings: unavoidable until policy rules are static strs.
 
+use crate::hitl::{
+    self, compute_request_hash, PendingApprovalBinding, PENDING_APPROVAL_TTL_MINUTES,
+};
 use crate::ledger::EnforceLedger;
 use crate::mandate::{self, Mandate};
-use chrono::{DateTime, Timelike, Utc};
+use crate::vehicle::VerifiedVehicleState;
+use chrono::{DateTime, Duration, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -32,9 +39,11 @@ pub enum Decision {
     Allow,
     Deny,
     Expired,
-    /// Action exceeds current mandate scope — requires higher authority approval.
-    /// The agent pauses. A human or higher-authority system reviews.
-    Escalate,
+    /// Phase 1 of the HITL state machine (ADR-0008): escalation is required.
+    /// `decide()` returns immediately with this verdict and a
+    /// `PendingApprovalBinding` in `Verdict.pending_approval`. No waiting occurs.
+    /// Phase 2 (`decide_with_approval()`) evaluates the human's signed grant.
+    PendingApproval,
 }
 
 impl std::fmt::Display for Decision {
@@ -43,7 +52,7 @@ impl std::fmt::Display for Decision {
             Decision::Allow => write!(f, "ALLOW"),
             Decision::Deny => write!(f, "DENY"),
             Decision::Expired => write!(f, "EXPIRED"),
-            Decision::Escalate => write!(f, "ESCALATE"),
+            Decision::PendingApproval => write!(f, "PENDING_APPROVAL"),
         }
     }
 }
@@ -66,6 +75,9 @@ pub struct Verdict {
     pub scope_hash: String,
     pub correlation_id: String,
     pub parent_receipt_hash: String,
+    /// Populated when `decision == PendingApproval` (ADR-0008 Phase 1).
+    /// Contains the binding that the Phase 2 `ApprovalGrant` must match.
+    pub pending_approval: Option<PendingApprovalBinding>,
 }
 
 /// Pure enforcement decision — runs the full 8-step pipeline with no I/O.
@@ -75,6 +87,19 @@ pub struct Verdict {
 /// operating-hours (step 5) checks. Callers must supply it explicitly so the
 /// function is deterministic and testable without mocking the system clock.
 ///
+/// # Vehicle state (ADR-0007)
+/// `verified_state` is the attested vehicle state for Sensitive-domain gating (step 4.5).
+/// Passing `None` causes the fail-safe default (`999 km/h, Drive`) to be used,
+/// which denies all Sensitive operations. Raw `VehicleState` cannot reach gating
+/// directly — callers must produce `VerifiedVehicleState` via
+/// `AttestedVehicleState::verify()` (gateway path) or
+/// `VerifiedVehicleState::from_operator_trusted()` (interim CLI path, ADR-0007 §4).
+///
+/// # HITL (ADR-0008)
+/// When a tool is in `escalate_tools`, `decide()` returns `PendingApproval`
+/// **immediately** — it never waits. The binding in `Verdict.pending_approval`
+/// identifies the request. Phase 2 is handled by `decide_with_approval()`.
+///
 /// # Ledger reads
 /// `ledger.is_revoked()` (step 0) and `ledger.count_recent()` (step 7) are
 /// read-only queries. No writes occur inside `decide()`.
@@ -82,29 +107,146 @@ pub struct Verdict {
 /// # Path canonicalization
 /// Uses logical normalization only — no filesystem access, no symlink resolution.
 /// When called through `enforce()`, the `path` param has already been resolved to
-/// a canonical real path before this function runs. When called directly (e.g. in
-/// tests or `no_std` contexts), symlinks in the path are **not** detected.
-///
-/// # API change vs pre-refactor `enforce()`
-/// Generic `<L: EnforceLedger>` replaces `&dyn EnforceLedger`. This is a
-/// static-dispatch (vtable-free) bound. All existing call sites that pass
-/// `&concrete_type` continue to compile unchanged.
+/// a canonical real path before this function runs.
 pub fn decide<L: EnforceLedger>(
     mandate_str: &str,
     tool: &str,
     params: &serde_json::Value,
     ledger: &L,
     now: DateTime<Utc>,
+    verified_state: Option<&VerifiedVehicleState>,
+) -> Result<Verdict, Box<dyn std::error::Error>> {
+    decide_core(
+        mandate_str,
+        tool,
+        params,
+        ledger,
+        now,
+        verified_state,
+        false,
+    )
+}
+
+/// Phase 2 of the HITL state machine (ADR-0008).
+///
+/// Validates a signed `ApprovalGrant` against the `PendingApprovalBinding` produced
+/// in Phase 1, then runs the full enforcement pipeline with the escalation trigger
+/// removed for this tool.
+///
+/// ## Ordering
+///
+/// 1. **Forbidden pre-check fires first** — unconditionally, before grant validation.
+///    A Forbidden tool is denied even with a cryptographically valid grant.
+///    This ordering is intentional and tested (test `test_phase2_forbidden_denied_even_with_valid_grant`).
+/// 2. Grant validation: binding match, request-hash match, TTL, ed25519 signature.
+/// 3. Pending binding TTL: the Phase 1 request must not be expired.
+/// 4. Full pipeline (steps 0–7) with escalation skipped.
+///
+/// On success, `Verdict.parent_receipt_hash` is set to `grant.parent_receipt_hash`
+/// so the ledger chain links Phase 1 and Phase 2 receipts.
+#[allow(clippy::too_many_arguments)]
+pub fn decide_with_approval<L: EnforceLedger>(
+    mandate_str: &str,
+    tool: &str,
+    params: &serde_json::Value,
+    ledger: &L,
+    now: DateTime<Utc>,
+    verified_state: Option<&VerifiedVehicleState>,
+    pending: &PendingApprovalBinding,
+    grant: &hitl::ApprovalGrant,
+) -> Result<Verdict, Box<dyn std::error::Error>> {
+    // We need the core fields for make_verdict before calling decide_core.
+    let params_hash = hex::encode(Sha256::digest(serde_json::to_string(params)?.as_bytes()));
+    let m: Mandate = toml::from_str(mandate_str)?;
+    let agent_did = m.mandate.agent_did.clone();
+    let agent_name = m.mandate.agent_name.clone();
+    let mandate_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
+    let proposal_hash = m.mandate.proposal_hash.clone();
+
+    let make_early_deny = |rule: &str| -> Verdict {
+        Verdict {
+            verdict_id: uuid::Uuid::new_v4().to_string(),
+            agent_did: agent_did.clone(),
+            agent_name: agent_name.clone(),
+            tool: tool.to_string(),
+            params_hash: params_hash.clone(),
+            decision: Decision::Deny,
+            policy_rule: rule.to_string(),
+            evaluated_at: now,
+            mandate_hash: mandate_hash.clone(),
+            proposal_hash: proposal_hash.clone(),
+            delegation_chain_hash: String::new(),
+            issuer_did: String::new(),
+            authority_level: String::new(),
+            scope_hash: String::new(),
+            correlation_id: String::new(),
+            parent_receipt_hash: String::new(),
+            pending_approval: None,
+        }
+    };
+
+    // ── Step 0 (Phase 2): Forbidden domain — unconditional, before grant check ──
+    // An approval grant cannot resurrect a Forbidden action.
+    if crate::vehicle::classify_vehicle_tool(tool) == crate::vehicle::VehicleDomain::Forbidden {
+        return Ok(make_early_deny(&format!(
+            "vehicle_forbidden_domain: '{}' is in the safety-critical domain \
+             and cannot be granted by any mandate or approval",
+            tool
+        )));
+    }
+
+    // ── Step 1 (Phase 2): Validate approval grant ──
+    use hitl::ApprovalGrantError;
+    if let Err(e) = grant.verify_against_binding(pending, now) {
+        let rule = match e {
+            ApprovalGrantError::BindingMismatch { field } => {
+                format!("approval_grant_invalid: {} mismatch", field)
+            }
+            ApprovalGrantError::Expired => "approval_grant_expired".to_string(),
+            ApprovalGrantError::InvalidSignature | ApprovalGrantError::InvalidPubkey => {
+                format!("approval_grant_invalid: {}", e)
+            }
+        };
+        return Ok(make_early_deny(&rule));
+    }
+
+    // ── Step 2 (Phase 2): Pending binding must not be expired ──
+    if now >= pending.ttl_expires_at {
+        return Ok(make_early_deny("pending_approval_expired"));
+    }
+
+    // ── Run the normal pipeline, skipping Step 6 (escalation already resolved) ──
+    let mut verdict = decide_core(mandate_str, tool, params, ledger, now, verified_state, true)?;
+
+    // Link Phase 2 receipt to Phase 1 receipt via parent_receipt_hash.
+    if verdict.decision == Decision::Allow && !grant.parent_receipt_hash.is_empty() {
+        verdict.parent_receipt_hash = grant.parent_receipt_hash.clone();
+        verdict.correlation_id = pending.binding_id.clone();
+    }
+
+    Ok(verdict)
+}
+
+/// Internal pipeline implementation shared by `decide()` and `decide_with_approval()`.
+///
+/// `skip_escalation`: when `true`, Step 6 (escalation check) is bypassed.
+/// Set by `decide_with_approval()` after validating a grant.
+fn decide_core<L: EnforceLedger>(
+    mandate_str: &str,
+    tool: &str,
+    params: &serde_json::Value,
+    ledger: &L,
+    now: DateTime<Utc>,
+    verified_state: Option<&VerifiedVehicleState>,
+    skip_escalation: bool,
 ) -> Result<Verdict, Box<dyn std::error::Error>> {
     let params_hash = hex::encode(Sha256::digest(serde_json::to_string(params)?.as_bytes()));
 
-    // Parse mandate
     let m: Mandate = toml::from_str(mandate_str)?;
 
     let agent_did = m.mandate.agent_did.clone();
     let agent_name = m.mandate.agent_name.clone();
 
-    // Compute mandate_hash early for revocation check and verdict
     let mandate_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
     let proposal_hash = m.mandate.proposal_hash.clone();
 
@@ -126,6 +268,7 @@ pub fn decide<L: EnforceLedger>(
             scope_hash: String::new(),
             correlation_id: String::new(),
             parent_receipt_hash: String::new(),
+            pending_approval: None,
         }
     };
 
@@ -185,7 +328,6 @@ pub fn decide<L: EnforceLedger>(
     }
 
     // ── Workspace Root Resolution ──
-    // Logical normalization only — no filesystem access.
     let workspace_root = if !m.mandate.workspace_root.is_empty() {
         Some(canonicalize_path_logical(&m.mandate.workspace_root))
     } else {
@@ -297,12 +439,14 @@ pub fn decide<L: EnforceLedger>(
         }
     }
 
-    // ── Step 4.5: Vehicle State Gating ──
-    // Only for Sensitive capabilities (door/window/trunk/lock). Comfort and
-    // Convenience are not gated; Forbidden was denied above. Unknown vehicle.*
-    // sub-domains are treated as Sensitive (fail-safe) by classify_vehicle_tool.
+    // ── Step 4.5: Vehicle State Gating (ADR-0007) ──
+    // Requires `Option<&VerifiedVehicleState>` — raw `VehicleState` cannot reach
+    // this path. `None` → `VehicleState::fail_safe()` → Sensitive DENY (safe default).
+    // Comfort, Convenience, and Forbidden are not evaluated here.
     if crate::vehicle::classify_vehicle_tool(tool) == crate::vehicle::VehicleDomain::Sensitive {
-        let state = crate::vehicle::extract_vehicle_state(params);
+        let state = verified_state
+            .map(|vs| vs.as_vehicle_state().clone())
+            .unwrap_or_else(crate::vehicle::VehicleState::fail_safe);
         if let crate::vehicle::StateVerdict::Deny(reason) =
             crate::vehicle::evaluate_vehicle_state(tool, &state)
         {
@@ -331,56 +475,96 @@ pub fn decide<L: EnforceLedger>(
         }
     }
 
-    // ── Step 6: Escalation Check ──
-    if m.escalation.escalate_tools.contains(&tool.to_string()) {
-        return Ok(make_verdict(
-            Decision::Escalate,
-            &format!(
-                "escalation_required: tool '{}' requires approval from {}",
-                tool,
-                if m.escalation.escalate_to.is_empty() {
-                    "higher authority"
-                } else {
-                    &m.escalation.escalate_to
+    // ── Step 6: Escalation Check (skipped in Phase 2 when grant is valid) ──
+    if !skip_escalation {
+        if m.escalation.escalate_tools.contains(&tool.to_string()) {
+            let timestamp = now.to_rfc3339();
+            let request_hash = compute_request_hash(&mandate_hash, tool, &params_hash, &timestamp);
+            let binding_id = uuid::Uuid::new_v4().to_string();
+            let ttl_expires_at = now + Duration::minutes(PENDING_APPROVAL_TTL_MINUTES);
+            let pending = PendingApprovalBinding {
+                binding_id,
+                request_hash,
+                escalate_to: m.escalation.escalate_to.clone(),
+                ttl_expires_at,
+            };
+            let mut v = make_verdict(
+                Decision::PendingApproval,
+                &format!(
+                    "escalation_required: tool '{}' requires approval from {}",
+                    tool,
+                    if m.escalation.escalate_to.is_empty() {
+                        "higher authority"
+                    } else {
+                        &m.escalation.escalate_to
+                    }
+                ),
+            );
+            v.pending_approval = Some(pending);
+            return Ok(v);
+        }
+
+        if let Some(raw_path) = params.get("path").and_then(|p| p.as_str()) {
+            let full_epath = canonicalize_path_logical(raw_path);
+            let epath = if let Some(ref root) = workspace_root {
+                full_epath
+                    .strip_prefix(root)
+                    .map(|p| p.trim_start_matches('/'))
+                    .unwrap_or(&full_epath)
+                    .to_string()
+            } else {
+                full_epath.clone()
+            };
+            let epath = &epath;
+            for pattern in &m.escalation.escalate_paths {
+                if glob_matches(pattern, epath) {
+                    let timestamp = now.to_rfc3339();
+                    let request_hash =
+                        compute_request_hash(&mandate_hash, tool, &params_hash, &timestamp);
+                    let binding_id = uuid::Uuid::new_v4().to_string();
+                    let pending = PendingApprovalBinding {
+                        binding_id,
+                        request_hash,
+                        escalate_to: m.escalation.escalate_to.clone(),
+                        ttl_expires_at: now + Duration::minutes(PENDING_APPROVAL_TTL_MINUTES),
+                    };
+                    let mut v = make_verdict(
+                        Decision::PendingApproval,
+                        &format!(
+                            "escalation_required: path '{}' matches escalate_paths '{}'",
+                            epath, pattern
+                        ),
+                    );
+                    v.pending_approval = Some(pending);
+                    return Ok(v);
                 }
-            ),
-        ));
-    }
-    if let Some(raw_path) = params.get("path").and_then(|p| p.as_str()) {
-        let full_epath = canonicalize_path_logical(raw_path);
-        let epath = if let Some(ref root) = workspace_root {
-            full_epath
-                .strip_prefix(root)
-                .map(|p| p.trim_start_matches('/'))
-                .unwrap_or(&full_epath)
-                .to_string()
-        } else {
-            full_epath.clone()
-        };
-        let epath = &epath;
-        for pattern in &m.escalation.escalate_paths {
-            if glob_matches(pattern, epath) {
-                return Ok(make_verdict(
-                    Decision::Escalate,
-                    &format!(
-                        "escalation_required: path '{}' matches escalate_paths '{}'",
-                        epath, pattern
-                    ),
-                ));
             }
         }
-    }
-    if let Some(target) = params.get("url").and_then(|u| u.as_str()) {
-        let ehost = extract_host(target);
-        for pattern in &m.escalation.escalate_hosts {
-            if glob_matches(pattern, &ehost) {
-                return Ok(make_verdict(
-                    Decision::Escalate,
-                    &format!(
-                        "escalation_required: host '{}' matches escalate_hosts '{}'",
-                        ehost, pattern
-                    ),
-                ));
+
+        if let Some(target) = params.get("url").and_then(|u| u.as_str()) {
+            let ehost = extract_host(target);
+            for pattern in &m.escalation.escalate_hosts {
+                if glob_matches(pattern, &ehost) {
+                    let timestamp = now.to_rfc3339();
+                    let request_hash =
+                        compute_request_hash(&mandate_hash, tool, &params_hash, &timestamp);
+                    let binding_id = uuid::Uuid::new_v4().to_string();
+                    let pending = PendingApprovalBinding {
+                        binding_id,
+                        request_hash,
+                        escalate_to: m.escalation.escalate_to.clone(),
+                        ttl_expires_at: now + Duration::minutes(PENDING_APPROVAL_TTL_MINUTES),
+                    };
+                    let mut v = make_verdict(
+                        Decision::PendingApproval,
+                        &format!(
+                            "escalation_required: host '{}' matches escalate_hosts '{}'",
+                            ehost, pattern
+                        ),
+                    );
+                    v.pending_approval = Some(pending);
+                    return Ok(v);
+                }
             }
         }
     }
@@ -408,22 +592,11 @@ pub fn decide<L: EnforceLedger>(
 /// `std::fs::canonicalize`. This prevents symlink-based boundary escapes where a
 /// symlink inside an allowed boundary points to a target outside it.
 ///
-/// Resolution policy (see also `resolve_path_for_enforce`):
-/// - If the path exists: returns the fully-resolved real path (symlinks followed).
-/// - If the path does not exist: canonicalises the parent directory and re-appends
-///   the leaf component. First-time file creation is supported as long as the
-///   parent directory is real.
-/// - If the parent cannot be resolved: returns `Err`. Callers should treat this
-///   as a DENY. No unresolved path is ever passed to `decide()`.
-///
-/// Accepted residual limitations (documented in `docs/adr/0004-pure-decision-path.md`):
-/// - **TOCTOU**: the symlink is resolved at decision time; the executor runs
-///   later under a different kernel call. A new symlink planted between decision
-///   and execution escapes this check.
-/// - **Executor-mismatch**: A2G decides; a separate process executes. Both must
-///   resolve paths identically (same CWD, no mount-namespace differences).
-///
-/// `decide()` remains I/O-free and receives the pre-resolved path.
+/// **Vehicle state (ADR-0007 interim posture)**: until the Secure Gateway is deployed,
+/// vehicle state supplied via `--vehicle-state` (in `params["vehicle_state"]`) is
+/// treated as operator-trusted. `enforce()` wraps it in
+/// `VerifiedVehicleState::from_operator_trusted()` and passes it to `decide()`.
+/// This is the documented interim path; the gateway will replace it with attested state.
 pub fn enforce<L: EnforceLedger>(
     mandate_str: &str,
     tool: &str,
@@ -438,7 +611,18 @@ pub fn enforce<L: EnforceLedger>(
     } else {
         params.clone()
     };
-    decide(mandate_str, tool, &resolved_params, ledger, Utc::now())
+
+    // Interim operator-trusted state from params (ADR-0007 §4).
+    let operator_state = crate::vehicle::extract_vehicle_state(&resolved_params);
+    let verified = VerifiedVehicleState::from_operator_trusted(operator_state);
+    decide(
+        mandate_str,
+        tool,
+        &resolved_params,
+        ledger,
+        Utc::now(),
+        Some(&verified),
+    )
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -495,12 +679,6 @@ fn validate_operating_hours(
 }
 
 /// Logical path canonicalization — pure, no filesystem access.
-///
-/// Resolves `.`, `..`, and double slashes without touching the disk.
-/// Symlinks are **not** resolved. This is the version used in `decide()`.
-///
-/// `canonicalize_path` (below) tries `std::fs::canonicalize` first and falls
-/// back here; it is kept for any `std`-only callers that want symlink resolution.
 pub(crate) fn canonicalize_path_logical(raw: &str) -> String {
     let is_absolute = raw.starts_with('/');
     let mut components: Vec<&str> = Vec::new();
@@ -529,11 +707,6 @@ pub(crate) fn canonicalize_path_logical(raw: &str) -> String {
     }
 }
 
-/// Path canonicalization with optional filesystem resolution.
-///
-/// Tries `std::fs::canonicalize` first (resolves symlinks, real path);
-/// falls back to `canonicalize_path_logical` for paths that don't exist on
-/// disk. Not used in `decide()` — kept for `std`-only call sites.
 #[cfg(feature = "std")]
 #[allow(dead_code)]
 fn canonicalize_path(raw: &str) -> String {
@@ -543,40 +716,15 @@ fn canonicalize_path(raw: &str) -> String {
     canonicalize_path_logical(raw)
 }
 
-/// Resolve a filesystem path to its canonical real form for the `enforce()` wrapper.
-///
-/// This is the **only** place in a2g-core that calls `std::fs`. `decide()` never
-/// calls this. The resolution steps are:
-///
-/// 1. Logical-normalize the raw path (collapse `.`, `..`, double slashes) — no I/O.
-///    After this step the leaf component is guaranteed not to be `..`.
-/// 2. Call `std::fs::canonicalize` on the normalized path. If it succeeds, return
-///    the real absolute path (all symlinks resolved).
-/// 3. If the path does not exist, split off the leaf component and canonicalize
-///    the parent directory. Because step 1 collapsed all `..`, the leaf is a plain
-///    filename — never `..` — so re-attaching it is safe. If the parent resolves,
-///    return `parent_real/leaf`. If the parent cannot be resolved either, return
-///    `Err`; the caller propagates this rather than passing an unresolved path through.
-///
-/// The leaf-reattach rule handles first-time file creation: the parent must be a
-/// real directory, so a symlinked parent is caught at this step. A leaf that is
-/// itself a dangling symlink is accepted (the symlink name is inside the checked
-/// boundary; the target is validated only when it is created — this is the
-/// documented TOCTOU residual).
 #[cfg(feature = "std")]
 fn resolve_path_for_enforce(raw: &str) -> Result<String, Box<dyn std::error::Error>> {
     if raw.is_empty() {
         return Ok(String::new());
     }
-    // Step 1: logical normalization — no I/O, ensures leaf is never `..`.
     let logical = canonicalize_path_logical(raw);
-
-    // Step 2: full resolution — follows every symlink component.
     if let Ok(resolved) = std::fs::canonicalize(&logical) {
         return Ok(resolved.to_string_lossy().into_owned());
     }
-
-    // Step 3: path doesn't exist — resolve parent, re-attach leaf.
     let path_obj = std::path::Path::new(&logical);
     let leaf = path_obj.file_name().ok_or_else(|| {
         format!(
@@ -602,11 +750,6 @@ fn resolve_path_for_enforce(raw: &str) -> Result<String, Box<dyn std::error::Err
         })
 }
 
-/// Glob matching for path patterns.
-///
-/// - `**` matches any number of path segments (including zero)
-/// - `*`  matches any characters within a single segment
-/// - exact string match otherwise
 fn glob_matches(pattern: &str, path: &str) -> bool {
     if pattern.contains("**") {
         let parts: Vec<&str> = pattern.splitn(2, "**").collect();
@@ -680,8 +823,6 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    /// No-op ledger for unit tests — focuses on mandate logic; ledger paths
-    /// (revocation + rate-limit) are covered by CLI integration tests.
     struct TestLedger;
 
     impl EnforceLedger for TestLedger {
@@ -709,7 +850,57 @@ mod tests {
         crate::mandate::sign_mandate(&template, &secret, 24).unwrap()
     }
 
-    // ── Existing tests (unchanged behaviour) ─────────────────────────────────
+    /// Build a signed mandate with specific tools listed.
+    fn cabin_mandate(tools: &[&str]) -> String {
+        let (did, _, _) = crate::identity::generate_agent_keypair();
+        let (_, secret, _) = crate::identity::generate_agent_keypair();
+        let mut template = crate::mandate::generate_template("cabin-agent", &did);
+        let tools_toml = tools
+            .iter()
+            .map(|t| format!("\"{}\"", t))
+            .collect::<Vec<_>>()
+            .join(", ");
+        template = template.replace(
+            r#"tools = ["read_file", "write_file"]"#,
+            &format!("tools = [{}]", tools_toml),
+        );
+        crate::mandate::sign_mandate(&template, &secret, 24).unwrap()
+    }
+
+    /// Build a signed mandate with specific tools AND escalate_tools.
+    fn cabin_escalate_mandate(tools: &[&str], escalate_tools: &[&str]) -> String {
+        let (did, _, _) = crate::identity::generate_agent_keypair();
+        let (_, secret, _) = crate::identity::generate_agent_keypair();
+        let mut template = crate::mandate::generate_template("cabin-agent", &did);
+        let tools_toml = tools
+            .iter()
+            .map(|t| format!("\"{}\"", t))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let escl_toml = escalate_tools
+            .iter()
+            .map(|t| format!("\"{}\"", t))
+            .collect::<Vec<_>>()
+            .join(", ");
+        template = template.replace(
+            r#"tools = ["read_file", "write_file"]"#,
+            &format!("tools = [{}]", tools_toml),
+        );
+        template = template.replace(
+            "escalate_tools = []",
+            &format!("escalate_tools = [{}]", escl_toml),
+        );
+        crate::mandate::sign_mandate(&template, &secret, 24).unwrap()
+    }
+
+    /// Decode a hex secret key into a SigningKey for use in tests.
+    fn signing_key_from_hex(secret_hex: &str) -> ed25519_dalek::SigningKey {
+        let bytes = hex::decode(secret_hex).unwrap();
+        let arr: [u8; 32] = bytes.try_into().unwrap();
+        ed25519_dalek::SigningKey::from_bytes(&arr)
+    }
+
+    // ── Existing tests ────────────────────────────────────────────────────────
 
     #[test]
     fn test_glob_matches() {
@@ -784,12 +975,6 @@ mod tests {
         assert!(result.policy_rule.contains("mandate_invalid"));
     }
 
-    // These two tests use paths that do not exist on disk, so they call `decide()`
-    // directly (which uses logical normalisation only). enforce() would try to
-    // resolve the parent directory on disk and return Err for non-existent trees.
-    // The boundary logic being tested is pure policy evaluation — not symlink
-    // resolution — so `decide()` is the correct entry point here.
-
     #[test]
     fn test_workspace_root_relative_match() {
         let (agent_did, _, _) = crate::identity::generate_agent_keypair();
@@ -803,7 +988,7 @@ mod tests {
         let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({"path": "/home/agent/workspace/data/test.txt"});
-        let result = decide(&signed, "read_file", &params, &db, Utc::now()).unwrap();
+        let result = decide(&signed, "read_file", &params, &db, Utc::now(), None).unwrap();
         assert_eq!(result.decision, Decision::Allow);
     }
 
@@ -819,7 +1004,7 @@ mod tests {
         let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({"path": "/home/agent/workspace/data/test.txt"});
-        let result = decide(&signed, "read_file", &params, &db, Utc::now()).unwrap();
+        let result = decide(&signed, "read_file", &params, &db, Utc::now(), None).unwrap();
         assert_eq!(result.decision, Decision::Allow);
     }
 
@@ -840,61 +1025,42 @@ mod tests {
         assert!(result.policy_rule.contains("boundary_violation"));
     }
 
-    // ── New tests using decide() with injected clock ──────────────────────────
-
-    /// TTL boundary: one second before expiry → ALLOW.
     #[test]
     fn test_ttl_just_before_expiry_allows() {
         let signed = signed_mandate();
-        // Parse expires_at from the signed mandate
         let m: crate::mandate::Mandate = toml::from_str(&signed).unwrap();
         let expires: DateTime<Utc> = m.mandate.expires_at.parse().unwrap();
-
-        // One second before expiry — should ALLOW
         let just_before = expires - chrono::Duration::seconds(1);
         let db = TestLedger;
         let params = serde_json::json!({"path": "workspace/file.txt"});
-        let result = decide(&signed, "read_file", &params, &db, just_before).unwrap();
-        assert_eq!(
-            result.decision,
-            Decision::Allow,
-            "1 second before expiry should ALLOW"
-        );
+        let result = decide(&signed, "read_file", &params, &db, just_before, None).unwrap();
+        assert_eq!(result.decision, Decision::Allow);
     }
 
-    /// TTL boundary: exactly at expiry → EXPIRED.
     #[test]
     fn test_ttl_at_expiry_denies() {
         let signed = signed_mandate();
         let m: crate::mandate::Mandate = toml::from_str(&signed).unwrap();
         let expires: DateTime<Utc> = m.mandate.expires_at.parse().unwrap();
-
         let db = TestLedger;
         let params = serde_json::json!({});
-        let result = decide(&signed, "read_file", &params, &db, expires).unwrap();
-        assert_eq!(
-            result.decision,
-            Decision::Expired,
-            "Exactly at expiry should EXPIRED"
-        );
+        let result = decide(&signed, "read_file", &params, &db, expires, None).unwrap();
+        assert_eq!(result.decision, Decision::Expired);
     }
 
-    /// TTL boundary: one hour past expiry → EXPIRED.
     #[test]
     fn test_ttl_past_expiry_denies() {
         let signed = signed_mandate();
         let m: crate::mandate::Mandate = toml::from_str(&signed).unwrap();
         let expires: DateTime<Utc> = m.mandate.expires_at.parse().unwrap();
-
         let db = TestLedger;
         let params = serde_json::json!({});
         let one_hour_late = expires + chrono::Duration::hours(1);
-        let result = decide(&signed, "read_file", &params, &db, one_hour_late).unwrap();
+        let result = decide(&signed, "read_file", &params, &db, one_hour_late, None).unwrap();
         assert_eq!(result.decision, Decision::Expired);
         assert_eq!(result.policy_rule, "mandate_ttl_exceeded");
     }
 
-    /// Jurisdiction: inject a time within operating hours → ALLOW.
     #[test]
     fn test_jurisdiction_inside_hours_allows() {
         let (did, _, _) = crate::identity::generate_agent_keypair();
@@ -904,22 +1070,14 @@ mod tests {
             "operating_hours = \"\"",
             "operating_hours = \"09:00-17:00\"",
         );
-        // 100-year TTL so injected 2030 dates fall within the mandate's valid window
         let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({});
-
-        // Noon UTC — well inside 09:00-17:00
         let noon = Utc.with_ymd_and_hms(2030, 6, 1, 12, 0, 0).unwrap();
-        let result = decide(&signed, "read_file", &params, &db, noon).unwrap();
-        assert_eq!(
-            result.decision,
-            Decision::Allow,
-            "Noon should be inside 09:00-17:00"
-        );
+        let result = decide(&signed, "read_file", &params, &db, noon, None).unwrap();
+        assert_eq!(result.decision, Decision::Allow);
     }
 
-    /// Jurisdiction: inject a time outside operating hours → DENY.
     #[test]
     fn test_jurisdiction_outside_hours_denies() {
         let (did, _, _) = crate::identity::generate_agent_keypair();
@@ -932,15 +1090,12 @@ mod tests {
         let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({});
-
-        // 02:00 UTC — outside 09:00-17:00
         let night = Utc.with_ymd_and_hms(2030, 6, 1, 2, 0, 0).unwrap();
-        let result = decide(&signed, "read_file", &params, &db, night).unwrap();
+        let result = decide(&signed, "read_file", &params, &db, night, None).unwrap();
         assert_eq!(result.decision, Decision::Deny);
         assert!(result.policy_rule.contains("jurisdiction_violation"));
     }
 
-    /// Jurisdiction: exactly at window boundary (17:00) → DENY.
     #[test]
     fn test_jurisdiction_at_end_boundary_denies() {
         let (did, _, _) = crate::identity::generate_agent_keypair();
@@ -953,33 +1108,15 @@ mod tests {
         let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({});
-
-        // 17:01 UTC — one minute past end
         let just_after = Utc.with_ymd_and_hms(2030, 6, 1, 17, 1, 0).unwrap();
-        let result = decide(&signed, "read_file", &params, &db, just_after).unwrap();
+        let result = decide(&signed, "read_file", &params, &db, just_after, None).unwrap();
         assert_eq!(result.decision, Decision::Deny);
         assert!(result.policy_rule.contains("jurisdiction_violation"));
     }
 
     // ── Vehicle capability tests ──────────────────────────────────────────────
 
-    fn cabin_mandate(tools: &[&str]) -> String {
-        let (did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("cabin-agent", &did);
-        let tools_toml = tools
-            .iter()
-            .map(|t| format!("\"{}\"", t))
-            .collect::<Vec<_>>()
-            .join(", ");
-        template = template.replace(
-            r#"tools = ["read_file", "write_file"]"#,
-            &format!("tools = [{}]", tools_toml),
-        );
-        crate::mandate::sign_mandate(&template, &secret, 24).unwrap()
-    }
-
-    /// Forbidden domain is denied even when the mandate lists the tool in capabilities.
+    /// Forbidden domain is denied even when the mandate lists the tool.
     #[test]
     fn test_forbidden_domain_denied_despite_mandate() {
         let signed = cabin_mandate(&["vehicle.powertrain.start_engine"]);
@@ -991,31 +1128,32 @@ mod tests {
             &params,
             &db,
             Utc::now(),
+            None,
         )
         .unwrap();
         assert_eq!(result.decision, Decision::Deny);
-        assert!(
-            result.policy_rule.contains("vehicle_forbidden_domain"),
-            "expected vehicle_forbidden_domain, got: {}",
-            result.policy_rule
-        );
+        assert!(result.policy_rule.contains("vehicle_forbidden_domain"));
     }
 
-    /// Sensitive tool (window) is allowed when Park and speed < 5.
+    /// Sensitive tool (window) is allowed when state is Park and speed < 5.
     #[test]
     fn test_window_allowed_when_parked() {
         let signed = cabin_mandate(&["vehicle.window.set_position"]);
         let db = TestLedger;
-        let params = serde_json::json!({
-            "position": 50,
-            "vehicle_state": {"speed_kph": 0.0, "gear": "Park", "actor": "Driver"}
-        });
+        let parked =
+            crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
+                speed_kph: 0.0,
+                gear: crate::vehicle::Gear::Park,
+                actor: crate::vehicle::Actor::Driver,
+            });
+        let params = serde_json::json!({"position": 50});
         let result = decide(
             &signed,
             "vehicle.window.set_position",
             &params,
             &db,
             Utc::now(),
+            Some(&parked),
         )
         .unwrap();
         assert_eq!(result.decision, Decision::Allow);
@@ -1026,56 +1164,12 @@ mod tests {
     fn test_window_denied_when_moving() {
         let signed = cabin_mandate(&["vehicle.window.set_position"]);
         let db = TestLedger;
-        let params = serde_json::json!({
-            "position": 50,
-            "vehicle_state": {"speed_kph": 60.0, "gear": "Drive", "actor": "Driver"}
-        });
-        let result = decide(
-            &signed,
-            "vehicle.window.set_position",
-            &params,
-            &db,
-            Utc::now(),
-        )
-        .unwrap();
-        assert_eq!(result.decision, Decision::Deny);
-        assert!(
-            result.policy_rule.contains("vehicle_state_violation"),
-            "expected vehicle_state_violation, got: {}",
-            result.policy_rule
-        );
-    }
-
-    /// Comfort tool (climate) is allowed regardless of speed or actor.
-    #[test]
-    fn test_comfort_allowed_while_moving() {
-        let signed = cabin_mandate(&["vehicle.climate.set_temperature"]);
-        let db = TestLedger;
-        let params = serde_json::json!({
-            "target_temp_c": 22,
-            "vehicle_state": {"speed_kph": 80.0, "gear": "Drive", "actor": "Passenger"}
-        });
-        let result = decide(
-            &signed,
-            "vehicle.climate.set_temperature",
-            &params,
-            &db,
-            Utc::now(),
-        )
-        .unwrap();
-        assert_eq!(result.decision, Decision::Allow);
-    }
-
-    /// Sensitive tool with no vehicle_state in params → fail-safe (999 km/h, Drive) → DENY.
-    ///
-    /// Verifies that the classify_vehicle_tool / Step 4.5 path, not string matching,
-    /// drives the gating: even with a mandate that lists the tool, omitting vehicle_state
-    /// triggers VehicleState::fail_safe() and the state gate fires.
-    #[test]
-    fn test_sensitive_no_state_denied_by_failsafe() {
-        let signed = cabin_mandate(&["vehicle.window.set_position"]);
-        let db = TestLedger;
-        // No vehicle_state key in params — extract_vehicle_state returns fail_safe()
+        let moving =
+            crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
+                speed_kph: 60.0,
+                gear: crate::vehicle::Gear::Drive,
+                actor: crate::vehicle::Actor::Driver,
+            });
         let params = serde_json::json!({"position": 50});
         let result = decide(
             &signed,
@@ -1083,74 +1177,102 @@ mod tests {
             &params,
             &db,
             Utc::now(),
+            Some(&moving),
         )
         .unwrap();
         assert_eq!(result.decision, Decision::Deny);
-        assert!(
-            result.policy_rule.contains("vehicle_state_violation"),
-            "expected vehicle_state_violation for omitted state, got: {}",
-            result.policy_rule
-        );
+        assert!(result.policy_rule.contains("vehicle_state_violation"));
     }
 
-    /// PERF_VEHICLE_SPEED is read-only telemetry (NonVehicle domain): passes the
-    /// forbidden pre-check, and a mandate listing it permits it via step 3.
+    /// Comfort tool (climate) is allowed regardless of vehicle state.
+    #[test]
+    fn test_comfort_allowed_while_moving() {
+        let signed = cabin_mandate(&["vehicle.climate.set_temperature"]);
+        let db = TestLedger;
+        let params = serde_json::json!({"target_temp_c": 22});
+        let result = decide(
+            &signed,
+            "vehicle.climate.set_temperature",
+            &params,
+            &db,
+            Utc::now(),
+            None, // Comfort: no state gating
+        )
+        .unwrap();
+        assert_eq!(result.decision, Decision::Allow);
+    }
+
+    /// Sensitive tool with no verified state (None) → fail-safe (999 km/h, Drive) → DENY.
+    #[test]
+    fn test_sensitive_no_state_denied_by_failsafe() {
+        let signed = cabin_mandate(&["vehicle.window.set_position"]);
+        let db = TestLedger;
+        let params = serde_json::json!({"position": 50});
+        let result = decide(
+            &signed,
+            "vehicle.window.set_position",
+            &params,
+            &db,
+            Utc::now(),
+            None, // No verified state → fail_safe() → DENY
+        )
+        .unwrap();
+        assert_eq!(result.decision, Decision::Deny);
+        assert!(result.policy_rule.contains("vehicle_state_violation"));
+    }
+
+    /// Read-only VHAL telemetry (NonVehicle domain) passes all checks.
     #[test]
     fn test_vhal_speed_read_permitted() {
         let signed = cabin_mandate(&["PERF_VEHICLE_SPEED"]);
         let db = TestLedger;
         let params = serde_json::json!({});
-        let result = decide(&signed, "PERF_VEHICLE_SPEED", &params, &db, Utc::now()).unwrap();
-        assert_eq!(
-            result.decision,
-            Decision::Allow,
-            "read-only telemetry should be ALLOW, got: {} — {}",
-            result.decision,
-            result.policy_rule
-        );
+        let result = decide(
+            &signed,
+            "PERF_VEHICLE_SPEED",
+            &params,
+            &db,
+            Utc::now(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.decision, Decision::Allow);
     }
 
-    /// CRUISE_CONTROL_COMMAND is Forbidden (ADAS write): hard-denied even when the
-    /// mandate explicitly lists it — forbidden pre-check fires before tool authorization.
+    /// Forbidden VHAL write (ADAS) is hard-denied even when listed in the mandate.
     #[test]
     fn test_vhal_adas_write_denied_despite_mandate() {
         let signed = cabin_mandate(&["CRUISE_CONTROL_COMMAND"]);
         let db = TestLedger;
         let params = serde_json::json!({});
-        let result = decide(&signed, "CRUISE_CONTROL_COMMAND", &params, &db, Utc::now()).unwrap();
+        let result = decide(
+            &signed,
+            "CRUISE_CONTROL_COMMAND",
+            &params,
+            &db,
+            Utc::now(),
+            None,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Deny);
-        assert!(
-            result.policy_rule.contains("vehicle_forbidden_domain"),
-            "expected vehicle_forbidden_domain, got: {}",
-            result.policy_rule
-        );
+        assert!(result.policy_rule.contains("vehicle_forbidden_domain"));
     }
 
     /// decide() and enforce() produce the same decision for the same mandate.
     #[test]
-    // enforce() now resolves paths via std::fs::canonicalize before calling decide().
-    // "workspace/data.csv" doesn't exist on disk so enforce() would return Err.
-    // Use /etc/passwd (always present on Linux) — both paths must produce the same
-    // DENY (boundary_violation via fs_deny "/etc/**") to confirm the wrapper is
-    // consistent.
     fn test_enforce_wraps_decide_consistently() {
         let signed = signed_mandate();
         let db = TestLedger;
-        // /etc/passwd exists on disk; enforce() canonicalises it (unchanged, no symlinks),
-        // then decide() denies it via fs_deny = ["/etc/**", ...].
         let params = serde_json::json!({"path": "/etc/passwd"});
 
         let via_enforce = enforce(&signed, "read_file", &params, &db).unwrap();
-        let via_decide = decide(&signed, "read_file", &params, &db, Utc::now()).unwrap();
+        let via_decide = decide(&signed, "read_file", &params, &db, Utc::now(), None).unwrap();
 
         assert_eq!(via_enforce.decision, Decision::Deny);
         assert_eq!(via_decide.decision, Decision::Deny);
         assert_eq!(via_enforce.policy_rule, via_decide.policy_rule);
     }
 
-    /// enforce() resolves a symlink that points outside the allowed boundary → DENY.
-    /// decide() called directly with the symlink path would ALLOW (no symlink resolution).
-    /// This test proves the mitigation in enforce().
     #[cfg(unix)]
     #[test]
     fn test_enforce_denies_symlink_file_escape() {
@@ -1161,7 +1283,6 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         let outside_file = outside.join("data.txt");
         std::fs::write(&outside_file, "out of bounds").unwrap();
-        // Symlink inside workspace pointing to outside file.
         std::os::unix::fs::symlink(&outside_file, workspace.join("evil_link")).unwrap();
 
         let (agent_did, _, _) = crate::identity::generate_agent_keypair();
@@ -1177,23 +1298,15 @@ mod tests {
         let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
 
-        // Path is the symlink name — lexically inside workspace.
         let symlink_path = workspace.join("evil_link").to_str().unwrap().to_string();
         let params = serde_json::json!({"path": symlink_path});
 
-        // enforce() resolves the symlink → real path outside workspace → DENY.
         let result = enforce(&signed, "read_file", &params, &db).unwrap();
-        assert_eq!(
-            result.decision,
-            Decision::Deny,
-            "symlink pointing outside workspace must be denied"
-        );
+        assert_eq!(result.decision, Decision::Deny);
 
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 
-    /// enforce() resolves a symlinked *parent directory* that points outside the
-    /// allowed boundary → DENY when accessing a file through it.
     #[cfg(unix)]
     #[test]
     fn test_enforce_denies_symlink_dir_escape() {
@@ -1203,7 +1316,6 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&outside_dir).unwrap();
         std::fs::write(outside_dir.join("report.csv"), "restricted").unwrap();
-        // Symlink: workspace/outsidedir → ../outside_dir (directory outside workspace).
         std::os::unix::fs::symlink(&outside_dir, workspace.join("outsidedir")).unwrap();
 
         let (agent_did, _, _) = crate::identity::generate_agent_keypair();
@@ -1219,7 +1331,6 @@ mod tests {
         let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
 
-        // Path goes through a symlinked directory — still lexically inside workspace.
         let path_through_symdir = workspace
             .join("outsidedir")
             .join("report.csv")
@@ -1228,14 +1339,330 @@ mod tests {
             .to_string();
         let params = serde_json::json!({"path": path_through_symdir});
 
-        // enforce() resolves the symlinked parent → real outside_dir → DENY.
         let result = enforce(&signed, "read_file", &params, &db).unwrap();
-        assert_eq!(
-            result.decision,
-            Decision::Deny,
-            "access via symlinked parent directory must be denied"
-        );
+        assert_eq!(result.decision, Decision::Deny);
 
         let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    // ── ADR-0008: HITL two-phase approval tests ───────────────────────────────
+
+    /// (a) Sensitive tool in escalate_tools → PendingApproval with correct binding.
+    ///     The binding_id and request_hash must be non-empty; ttl_expires_at must be
+    ///     in the future. This is Phase 1 of the ADR-0008 state machine.
+    #[test]
+    fn test_sensitive_escalate_returns_pending_approval() {
+        let signed = cabin_escalate_mandate(&["WINDOW_POS"], &["WINDOW_POS"]);
+        let db = TestLedger;
+        let parked =
+            crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
+                speed_kph: 0.0,
+                gear: crate::vehicle::Gear::Park,
+                actor: crate::vehicle::Actor::Driver,
+            });
+        let now = Utc::now();
+        let result = decide(
+            &signed,
+            "WINDOW_POS",
+            &serde_json::json!({}),
+            &db,
+            now,
+            Some(&parked),
+        )
+        .unwrap();
+        assert_eq!(result.decision, Decision::PendingApproval);
+        let pending = result
+            .pending_approval
+            .expect("PendingApproval must carry a binding");
+        assert!(
+            !pending.binding_id.is_empty(),
+            "binding_id must not be empty"
+        );
+        assert!(
+            !pending.request_hash.is_empty(),
+            "request_hash must not be empty"
+        );
+        assert!(
+            pending.ttl_expires_at > now,
+            "ttl_expires_at must be in the future"
+        );
+    }
+
+    /// (b) Valid unexpired grant bound to the correct Phase 1 binding → ALLOW.
+    #[test]
+    fn test_phase2_valid_grant_allows() {
+        let signed = cabin_escalate_mandate(&["WINDOW_POS"], &["WINDOW_POS"]);
+        let db = TestLedger;
+        let parked =
+            crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
+                speed_kph: 0.0,
+                gear: crate::vehicle::Gear::Park,
+                actor: crate::vehicle::Actor::Driver,
+            });
+        let now = Utc::now();
+
+        // Phase 1
+        let v1 = decide(
+            &signed,
+            "WINDOW_POS",
+            &serde_json::json!({}),
+            &db,
+            now,
+            Some(&parked),
+        )
+        .unwrap();
+        assert_eq!(v1.decision, Decision::PendingApproval);
+        let pending = v1.pending_approval.unwrap();
+
+        // Create a valid signed grant for this binding
+        let (approver_did, approver_secret, _) = crate::identity::generate_agent_keypair();
+        let approver_key = signing_key_from_hex(&approver_secret);
+        let grant_time = now + chrono::Duration::seconds(1);
+        let grant = crate::hitl::ApprovalGrant::new_signed(
+            &pending.binding_id,
+            &pending.request_hash,
+            &approver_did,
+            &approver_key,
+            300,
+            grant_time,
+            "",
+        );
+
+        // Phase 2
+        let v2 = decide_with_approval(
+            &signed,
+            "WINDOW_POS",
+            &serde_json::json!({}),
+            &db,
+            grant_time + chrono::Duration::seconds(1),
+            Some(&parked),
+            &pending,
+            &grant,
+        )
+        .unwrap();
+        assert_eq!(
+            v2.decision,
+            Decision::Allow,
+            "valid grant should produce ALLOW: {}",
+            v2.policy_rule
+        );
+    }
+
+    /// (c) Grant whose request_hash was signed for a different action → DENY.
+    ///     Prevents cross-request replay: approving action A cannot authorise action B.
+    #[test]
+    fn test_phase2_mismatched_request_hash_denies() {
+        let signed = cabin_escalate_mandate(&["WINDOW_POS"], &["WINDOW_POS"]);
+        let db = TestLedger;
+        let parked =
+            crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
+                speed_kph: 0.0,
+                gear: crate::vehicle::Gear::Park,
+                actor: crate::vehicle::Actor::Driver,
+            });
+        let now = Utc::now();
+
+        let v1 = decide(
+            &signed,
+            "WINDOW_POS",
+            &serde_json::json!({}),
+            &db,
+            now,
+            Some(&parked),
+        )
+        .unwrap();
+        let pending = v1.pending_approval.unwrap();
+
+        // Grant signed for a different request_hash (cross-request replay attempt)
+        let (approver_did, approver_secret, _) = crate::identity::generate_agent_keypair();
+        let approver_key = signing_key_from_hex(&approver_secret);
+        let wrong_hash = "0".repeat(64);
+        let grant = crate::hitl::ApprovalGrant::new_signed(
+            &pending.binding_id,
+            &wrong_hash,
+            &approver_did,
+            &approver_key,
+            300,
+            now + chrono::Duration::seconds(1),
+            "",
+        );
+
+        let v2 = decide_with_approval(
+            &signed,
+            "WINDOW_POS",
+            &serde_json::json!({}),
+            &db,
+            now + chrono::Duration::seconds(2),
+            Some(&parked),
+            &pending,
+            &grant,
+        )
+        .unwrap();
+        assert_eq!(v2.decision, Decision::Deny);
+        assert!(
+            v2.policy_rule.contains("request_hash"),
+            "policy rule should identify request_hash mismatch, got: {}",
+            v2.policy_rule
+        );
+    }
+
+    /// (d) Expired grant → DENY (replay-via-time prevention).
+    #[test]
+    fn test_phase2_expired_grant_denies() {
+        let signed = cabin_escalate_mandate(&["WINDOW_POS"], &["WINDOW_POS"]);
+        let db = TestLedger;
+        let parked =
+            crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
+                speed_kph: 0.0,
+                gear: crate::vehicle::Gear::Park,
+                actor: crate::vehicle::Actor::Driver,
+            });
+        let now = Utc::now();
+
+        let v1 = decide(
+            &signed,
+            "WINDOW_POS",
+            &serde_json::json!({}),
+            &db,
+            now,
+            Some(&parked),
+        )
+        .unwrap();
+        let pending = v1.pending_approval.unwrap();
+
+        // Grant issued 1 hour ago with 30-second TTL → already expired
+        let (approver_did, approver_secret, _) = crate::identity::generate_agent_keypair();
+        let approver_key = signing_key_from_hex(&approver_secret);
+        let past = now - chrono::Duration::hours(1);
+        let grant = crate::hitl::ApprovalGrant::new_signed(
+            &pending.binding_id,
+            &pending.request_hash,
+            &approver_did,
+            &approver_key,
+            30, // 30s TTL — expired 3570s ago
+            past,
+            "",
+        );
+
+        // Evaluate at `now` — grant is long expired
+        let v2 = decide_with_approval(
+            &signed,
+            "WINDOW_POS",
+            &serde_json::json!({}),
+            &db,
+            now,
+            Some(&parked),
+            &pending,
+            &grant,
+        )
+        .unwrap();
+        assert_eq!(v2.decision, Decision::Deny);
+        assert!(
+            v2.policy_rule.contains("approval_grant_expired"),
+            "expected approval_grant_expired, got: {}",
+            v2.policy_rule
+        );
+    }
+
+    /// (e) AttestedVehicleState::verify() rejects:
+    ///     - bad signature (tampered bytes)
+    ///     - stale nonce (wrong challenge)
+    ///     - stale timestamp (too old)
+    ///     and accepts a valid attestation.
+    #[test]
+    fn test_attested_state_verify() {
+        let (_, secret, _) = crate::identity::generate_agent_keypair();
+        let key = signing_key_from_hex(&secret);
+        let pubkey_hex = hex::encode(key.verifying_key().to_bytes());
+        let nonce = "challenge-abc-123";
+        let now = Utc::now();
+        let state = crate::vehicle::VehicleState {
+            speed_kph: 0.0,
+            gear: crate::vehicle::Gear::Park,
+            actor: crate::vehicle::Actor::Driver,
+        };
+        let attested = crate::vehicle::AttestedVehicleState::sign(state, &key, nonce, now);
+
+        // Valid attestation with correct nonce → Ok
+        assert!(
+            attested.verify(&pubkey_hex, now, Some(nonce)).is_ok(),
+            "valid attestation must verify"
+        );
+
+        // Bad signature
+        let mut bad_sig = attested.clone();
+        bad_sig.signature = "00".repeat(64);
+        assert_eq!(
+            bad_sig.verify(&pubkey_hex, now, Some(nonce)).unwrap_err(),
+            crate::vehicle::AttestationError::BadSignature
+        );
+
+        // Wrong nonce (stale nonce / replay)
+        assert_eq!(
+            attested
+                .verify(&pubkey_hex, now, Some("wrong-nonce"))
+                .unwrap_err(),
+            crate::vehicle::AttestationError::StaleNonce
+        );
+
+        // Stale timestamp: now = attested_at + 1000ms >> MAX_AGE_MS (500ms)
+        let stale_now = now + chrono::Duration::milliseconds(1000);
+        assert_eq!(
+            attested.verify(&pubkey_hex, stale_now, None).unwrap_err(),
+            crate::vehicle::AttestationError::Stale
+        );
+    }
+
+    /// (f) Forbidden tool is denied even when a fully valid ApprovalGrant is supplied.
+    ///     The Forbidden pre-check fires unconditionally before grant evaluation.
+    ///     This ordering is critical: no approval can resurrect a Forbidden action.
+    #[test]
+    fn test_phase2_forbidden_denied_even_with_valid_grant() {
+        // Create a plausible (but irrelevant) pending binding and grant for a Forbidden tool.
+        // The Forbidden check fires before grant validation, so the grant is never inspected.
+        let signed = cabin_mandate(&["CRUISE_CONTROL_COMMAND"]);
+        let db = TestLedger;
+        let now = Utc::now();
+
+        let binding = crate::hitl::PendingApprovalBinding {
+            binding_id: uuid::Uuid::new_v4().to_string(),
+            request_hash: "a".repeat(64),
+            escalate_to: "did:a2g:approver".to_string(),
+            ttl_expires_at: now + chrono::Duration::minutes(5),
+        };
+
+        let (approver_did, approver_secret, _) = crate::identity::generate_agent_keypair();
+        let approver_key = signing_key_from_hex(&approver_secret);
+        let grant = crate::hitl::ApprovalGrant::new_signed(
+            &binding.binding_id,
+            &binding.request_hash,
+            &approver_did,
+            &approver_key,
+            300,
+            now,
+            "",
+        );
+
+        let v = decide_with_approval(
+            &signed,
+            "CRUISE_CONTROL_COMMAND",
+            &serde_json::json!({}),
+            &db,
+            now + chrono::Duration::seconds(1),
+            None,
+            &binding,
+            &grant,
+        )
+        .unwrap();
+        assert_eq!(
+            v.decision,
+            Decision::Deny,
+            "Forbidden tool must be denied even with a valid grant"
+        );
+        assert!(
+            v.policy_rule.contains("vehicle_forbidden_domain"),
+            "policy rule must identify vehicle_forbidden_domain, got: {}",
+            v.policy_rule
+        );
     }
 }
