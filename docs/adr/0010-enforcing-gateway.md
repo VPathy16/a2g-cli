@@ -104,13 +104,13 @@ For the Phase-2 flow, the gateway also holds the **binding-signing key** (closin
 
 The gateway performs the following checks in order. Any failure terminates the request; no bus write occurs.
 
-1. **Signature valid** — verify the ed25519 signature against the canonical payload using the known rich-domain receipt-signing key.
-2. **Decision is ALLOW** — only `ALLOW` receipts proceed. `DENY`, `EXPIRED`, `PENDING_APPROVAL`, and `ERROR` are all rejected.
-3. **Freshness** — `issued_at_ms` must be within an implementation-defined window (provisionally 2 seconds) of the gateway's clock. Receipts outside this window are rejected regardless of signature validity.
-4. **Nonce not seen** — the nonce must not appear in the gateway's recent-nonce ring buffer. This prevents replay of a valid ALLOW receipt for a different action invocation.
-5. **Action match** — `tool` and `SHA-256(tool || params_json || issued_at_ms)` must match `request_hash`. This ensures the receipt covers exactly the action being presented, not a different one.
-6. **Binding match** (Phase 2 only) — `binding_id` must match a pending-approval entry in the gateway's queue, and the `request_hash` in the binding must match the receipt's `request_hash`.
-7. **Independent forbidden re-check** — see §Independent Forbidden Re-Check below.
+1. **Independent forbidden re-check** — see §Forbidden-First below.  Checked **before** signature verification as defense-in-depth.
+2. **Signature valid** — verify the ed25519 signature against the canonical payload using the known rich-domain receipt-signing key.
+3. **Decision is ALLOW** — only `ALLOW` receipts proceed. `DENY`, `EXPIRED`, `PENDING_APPROVAL`, and `ERROR` are all rejected.
+4. **Freshness** — `issued_at_ms` must be within ±2 000 ms of the gateway's clock (bidirectional; see §Freshness Windows). Receipts outside this window are rejected.
+5. **Nonce not seen** — the nonce must not appear in the gateway's recent-nonce ring buffer. This prevents replay of a valid ALLOW receipt for a different action invocation.
+6. **Action match** — `SHA-256(tool || params_json || issued_at_ms)` must match `request_hash`. This ensures the receipt covers exactly the action being presented, not a different one.
+7. **Binding match** (Phase 2 only) — `binding_id` must match an approved entry in the gateway's pending queue (one-use; consumed on success).
 
 Only after all seven checks pass does the gateway write to the bus.
 
@@ -120,19 +120,49 @@ For the demo tier, receipts are exchanged as JSON over a Unix domain socket (`/r
 
 ---
 
-## Independent Forbidden Re-Check
+## Forbidden-First
 
-The gateway maintains its own copy of the forbidden-domain list. This list is identical in content to the one in `a2g-core` (`enforce.rs` §forbidden domain), but the gateway's copy is consulted independently, after signature verification.
+The gateway's forbidden re-check runs **before** ed25519 signature verification (step 1 of 7).  This is a deliberate security decision, not an oversight.
 
 **Even a validly-signed ALLOW receipt for a forbidden capability is refused at the gateway.**
 
-The rich domain is never trusted to have performed the forbidden check correctly. This provides defense in depth against:
+### Why forbidden-first is safe on unverified input
+
+A natural concern: the gateway classifies an as-yet-unauthenticated tool string.  Could a malformed or oversized string cause a panic, hang, or over-allocation before the signature step would have rejected it?
+
+The classifier (`classify_vehicle_tool`) is:
+
+- **Allocation-free.** It operates entirely on `&str` comparisons (`starts_with` chains and a linear scan over a 415-entry static VHAL property table).  No heap allocation on any path.
+- **Panic-free.** All branches are pure comparisons with no indexing on the input string, no unwraps, and no recursion.  An arbitrarily long or unusual input returns `NonVehicle` or `Sensitive` — it never panics.
+- **Bounded work.** O(1) for `vehicle.*` prefixes (seven `starts_with` tests), O(415) for VHAL property names (one linear scan over a fixed table).
+
+An unauthenticated caller gains nothing from the classification result:
+
+- A **forbidden** return is an unconditional `REFUSE` with no side effects — no information about keys, no state change.
+- A **non-forbidden** return still requires a valid gateway-issued ed25519 signature at step 2.  A compromised or unauthenticated sender cannot manufacture that signature.
+
+### Defense-in-depth rationale
+
+Checking forbidden first provides defense against:
 
 - A bug in `a2g-core` that causes a forbidden tool to be evaluated in the wrong domain.
 - A compromised rich domain that constructs a receipt for a forbidden action and obtains a valid signature by presenting it to a complicit signer.
 - A future mandate-configuration error that accidentally lists a forbidden tool in an ALLOW scope.
 
 The gateway's forbidden list is updated only through the gateway's own configuration path, which is outside the rich domain's write access.
+
+---
+
+## Freshness Windows
+
+There are two distinct freshness checks in the system, with different values and directionality.
+
+| Artifact | Constant | Value | Directionality | Rationale |
+|---|---|---|---|---|
+| ECU-signed vehicle state (`AttestedVehicleState`) | `ATTESTATION_FRESHNESS_MS` | 500 ms | Unidirectional (past-only: `0 ≤ age ≤ 500 ms`) | A sensor reading more than 500 ms old may not reflect current vehicle state; future-dated sensor readings are rejected as invalid. |
+| Gateway receipt | `RECEIPT_FRESHNESS_MS` | 2 000 ms | Bidirectional (±2 000 ms) | Cross-process clock skew between the receipt signer (rich domain) and verifier (gateway) running on the same host.  The ±2 s window is generous for a same-host deployment and intentionally accepts receipts issued up to 2 s in the future. |
+
+The two windows govern fundamentally different trust concerns: the attestation window bounds how stale a physical sensor reading can be; the receipt window tolerates OS scheduler jitter between co-located processes.  They are not interchangeable.
 
 ---
 
@@ -258,20 +288,20 @@ Agent                    a2g-core (rich)          Gateway (trusted)        Human
   |                           |                        |                        |
   |--- present ALLOW receipt ------------------------>|                        |
   |   (signed GatewayReceipt) |                        |                        |
-  |                           |                        |-- 1. verify sig        |
-  |                           |                        |-- 2. decision == ALLOW |
-  |                           |                        |-- 3. freshness check   |
-  |                           |                        |-- 4. nonce not seen    |
-  |                           |                        |-- 5. action match      |
-  |                           |                        |-- 6. binding match     |
-  |                           |                        |-- 7. forbidden re-check|
+  |                           |                        |-- 1. forbidden re-check|
   |                           |                        |   WINDOW_POS: not      |
   |                           |                        |   forbidden → pass     |
+  |                           |                        |-- 2. verify sig        |
+  |                           |                        |-- 3. decision == ALLOW |
+  |                           |                        |-- 4. freshness check   |
+  |                           |                        |-- 5. nonce not seen    |
+  |                           |                        |-- 6. action match      |
+  |                           |                        |-- 7. binding match     |
   |                           |                        |                        |
   |<-- enforced ---------------------------------- write to vcan0 ------------->
 ```
 
-If at any point verification fails (e.g., the agent presents a receipt for `BRAKE_OVERRIDE`, which is in the forbidden domain), step 7 rejects it and the bus write does not occur, regardless of the ALLOW in the receipt.
+If at any point verification fails (e.g., the agent presents a receipt for `BRAKE_OVERRIDE`, which is in the forbidden domain), step 1 rejects it and the bus write does not occur, regardless of the ALLOW in the receipt.
 
 ---
 

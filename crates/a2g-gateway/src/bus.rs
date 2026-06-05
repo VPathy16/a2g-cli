@@ -17,16 +17,31 @@ const A2G_CAN_ID: u32 = 0x7A2;
 /// Prefix used for simulated-bus log lines (checked by tests and demo scripts).
 pub const SIMULATED_FRAME_PREFIX: &str = "[gateway:bus:simulated] CAN FRAME";
 
+/// Returns `true` if the named CAN interface exists on this host.
+///
+/// Used by tests to decide whether to expect a real-bus write or the simulated
+/// fallback.  Does not check socket permissions — a present interface may still
+/// fail to write if the process lacks `CAP_NET_RAW`.
+pub fn vcan_available(iface: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    return std::path::Path::new(&format!("/sys/class/net/{iface}")).exists();
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = iface;
+        false
+    }
+}
+
 /// Write an enforcement CAN frame for a verified ALLOW verdict.
 ///
-/// Returns the 8-byte frame as a hex string regardless of whether a real or
-/// simulated write was performed.  Callers (the handler) log the result; the
-/// bus module itself prints diagnostic lines so the demo script can observe them.
+/// Returns `(frame_hex, real_write)`.  `real_write` is `true` when a real
+/// SocketCAN write succeeded; `false` when the simulated fallback fired (CI,
+/// no vcan kernel module, or missing `CAP_NET_RAW`).
 ///
 /// Frame layout (ADR-0010 §Bus Interface):
 /// - Bytes 0–3: bytes 4–7 of the verdict UUID (hex, dashes stripped)
 /// - Bytes 4–7: first 4 bytes of SHA-256(tool)
-pub fn write_enforcement_frame(iface: &str, verdict_id: &str, tool: &str) -> String {
+pub fn write_enforcement_frame(iface: &str, verdict_id: &str, tool: &str) -> (String, bool) {
     let frame = build_frame(verdict_id, tool);
     let hex = hex::encode(frame);
 
@@ -37,7 +52,7 @@ pub fn write_enforcement_frame(iface: &str, verdict_id: &str, tool: &str) -> Str
         println!("{} {} on {}", SIMULATED_FRAME_PREFIX, hex, iface);
     }
 
-    hex
+    (hex, wrote_real)
 }
 
 fn build_frame(verdict_id: &str, tool: &str) -> [u8; 8] {

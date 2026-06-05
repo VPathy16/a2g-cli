@@ -19,6 +19,7 @@ use a2g_core::ledger::NoopLedger;
 use a2g_core::vehicle::{
     Actor, AttestedVehicleState, Gear, VehicleState, VerifiedVehicleState, ATTESTATION_FRESHNESS_MS,
 };
+use a2g_gateway::bus;
 use a2g_gateway::client::{send_request, sign_receipt_with_params};
 use a2g_gateway::keys::{generate, DemoKeys};
 use a2g_gateway::protocol::{GatewayReceipt, GatewayRequest, GatewayResponse};
@@ -624,5 +625,141 @@ fn test_attested_state_stale_rejected_by_gateway() {
     assert!(
         matches!(&resp, GatewayResponse::Refused { reason } if reason.contains("attestation")),
         "stale attestation must be rejected at gateway; got: {resp:?}"
+    );
+}
+
+#[test]
+fn test_malformed_tool_no_panic() {
+    // Step 1 (forbidden classifier) runs before signature verification on the
+    // unverified tool string.  Verify classify_vehicle_tool() does not panic or
+    // over-allocate on adversarial inputs — it is allocation-free, panic-free,
+    // and O(bounded) over all inputs.
+    let gw = GatewayHandle::start();
+    let oversized = "x".repeat(65_536);
+
+    let cases: &[&str] = &[
+        &oversized,
+        "../../../../etc/passwd",
+        "VEHICLE.POWERTRAIN.SET_THROTTLE", // wrong case — not forbidden (case-sensitive)
+        "vehicle.unknown.deeply.nested.subpath.a.b.c.d.e.f",
+    ];
+
+    for tool in cases {
+        let issued_at_ms = Utc::now().timestamp_millis();
+        let mut nonce = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        let nonce_hex = hex::encode(nonce);
+        let request_hash = GatewayReceipt::compute_request_hash(tool, "{}", issued_at_ms);
+
+        // Sign with an unknown key so signature fails at step 2 (proving the
+        // classifier ran without panicking first).
+        let wrong_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let partial = GatewayReceipt {
+            verdict_id: uuid::Uuid::new_v4().to_string(),
+            decision: "ALLOW".to_string(),
+            tool: (*tool).to_string(),
+            params_json: "{}".to_string(),
+            policy_rule: "test".to_string(),
+            state_trust: "none".to_string(),
+            binding_id: String::new(),
+            request_hash,
+            issued_at_ms,
+            nonce_hex,
+            signature_hex: String::new(),
+            attested_state_json: None,
+        };
+        let payload = partial.canonical_payload();
+        let sig: ed25519_dalek::Signature = wrong_key.sign(payload.as_bytes());
+        let receipt = GatewayReceipt {
+            signature_hex: hex::encode(sig.to_bytes()),
+            ..partial
+        };
+
+        let resp = gw.send(&GatewayRequest::Enforce {
+            receipt: Box::new(receipt),
+        });
+        // Classifier ran without panic; response is either "forbidden" (prefix
+        // matched) or "signature" (unknown key rejected at step 2).
+        assert!(
+            matches!(&resp, GatewayResponse::Refused { .. }),
+            "malformed tool must be refused without panic; got: {resp:?}"
+        );
+    }
+}
+
+#[test]
+fn test_vcan_real_frame_and_no_frame_on_refused() {
+    // Skipped in CI (no vcan kernel module).  To run locally:
+    //   modprobe vcan
+    //   ip link add dev vcan0 type vcan && ip link set up vcan0
+    //
+    // When vcan0 is present, GatewayResponse::Enforced { real_write: true, .. }
+    // confirms a real SocketCAN frame was written — not just a simulated log line.
+    // A refused action returns GatewayResponse::Refused with no bus write.
+    if !bus::vcan_available("vcan0") {
+        eprintln!("[skip] vcan0 not present; CI uses simulated bus; skipping real-vcan assertions");
+        return;
+    }
+
+    let gw = GatewayHandle::start();
+
+    // Enforced ALLOW → real CAN frame.
+    let mandate = comfort_mandate();
+    let params: serde_json::Value = serde_json::json!({});
+    let verdict = decide(
+        &mandate,
+        "vehicle.climate.set_temperature",
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        None,
+    )
+    .unwrap();
+    let resp = enforce(&gw, &verdict, "{}");
+    assert!(
+        matches!(
+            &resp,
+            GatewayResponse::Enforced {
+                real_write: true,
+                ..
+            }
+        ),
+        "vcan ALLOW must produce a real frame (real_write: true); got: {resp:?}"
+    );
+
+    // Refused action (forbidden tool, valid sig) → no bus write.
+    let key = gw.receipt_signing_key();
+    let issued_at_ms = Utc::now().timestamp_millis();
+    let mut nonce = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let nonce_hex = hex::encode(nonce);
+    let forbidden_tool = "vehicle.powertrain.set_throttle";
+    let request_hash = GatewayReceipt::compute_request_hash(forbidden_tool, "{}", issued_at_ms);
+    let partial = GatewayReceipt {
+        verdict_id: uuid::Uuid::new_v4().to_string(),
+        decision: "ALLOW".to_string(),
+        tool: forbidden_tool.to_string(),
+        params_json: "{}".to_string(),
+        policy_rule: "test".to_string(),
+        state_trust: "none".to_string(),
+        binding_id: String::new(),
+        request_hash,
+        issued_at_ms,
+        nonce_hex,
+        signature_hex: String::new(),
+        attested_state_json: None,
+    };
+    let payload = partial.canonical_payload();
+    let sig: ed25519_dalek::Signature = key.sign(payload.as_bytes());
+    let forbidden_receipt = GatewayReceipt {
+        signature_hex: hex::encode(sig.to_bytes()),
+        ..partial
+    };
+    let refused = gw.send(&GatewayRequest::Enforce {
+        receipt: Box::new(forbidden_receipt),
+    });
+    assert!(
+        matches!(&refused, GatewayResponse::Refused { .. }),
+        "forbidden tool must be refused on real vcan (no bus write); got: {refused:?}"
     );
 }

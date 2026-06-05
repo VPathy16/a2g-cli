@@ -32,8 +32,17 @@ use crate::keys::{DemoKeys, GatewayKeys};
 use crate::pending::PendingQueue;
 use crate::protocol::{GatewayReceipt, GatewayRequest, GatewayResponse};
 
-/// Receipt freshness window: receipts older or newer than this are rejected.
-const FRESHNESS_MS: i64 = 2_000;
+/// Receipt freshness window.
+///
+/// The check is **bidirectional (±2 000 ms)** to tolerate sub-millisecond
+/// cross-process clock skew between the rich domain (receipt signer) and the
+/// gateway (verifier).  Both processes run on the same host in the demo tier;
+/// ±2 s is deliberately generous for that deployment.
+///
+/// Distinct from `a2g_core::vehicle::ATTESTATION_FRESHNESS_MS` (500 ms,
+/// unidirectional past-only) which governs ECU-signed vehicle state freshness.
+/// See ADR-0010 §Freshness Windows for the rationale behind both values.
+const RECEIPT_FRESHNESS_MS: i64 = 2_000;
 
 /// Shared gateway state (Arc-wrapped for multi-connection serving).
 pub struct GatewayState {
@@ -241,6 +250,13 @@ fn handle_submit_grant(grant_json: String, state: &Arc<GatewayState>) -> Gateway
 
 fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> GatewayResponse {
     // ── Step 1: Forbidden re-check (FIRST — unconditional, no exceptions) ──────
+    // Checked before signature verification (defense-in-depth).  Safe on
+    // unverified input: classify_vehicle_tool() is allocation-free, panic-free,
+    // and O(bounded) — starts_with chains for vehicle.* prefixes, linear scan
+    // over a fixed 415-entry VHAL table for everything else.  An unauthenticated
+    // caller cannot exploit the classification: a forbidden return is an
+    // unconditional REFUSE; a non-forbidden return still requires a valid
+    // gateway-issued signature at step 2.  See ADR-0010 §Forbidden-First.
     if forbidden::is_forbidden(&receipt.tool) {
         let reason = forbidden::refuse_reason(&receipt.tool);
         eprintln!("[gateway] REFUSE {reason}");
@@ -279,10 +295,10 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
     // ── Step 4: Freshness ──────────────────────────────────────────────────────
     let now_ms = Utc::now().timestamp_millis();
     let age_ms = now_ms - receipt.issued_at_ms;
-    if !(-FRESHNESS_MS..=FRESHNESS_MS).contains(&age_ms) {
+    if !(-RECEIPT_FRESHNESS_MS..=RECEIPT_FRESHNESS_MS).contains(&age_ms) {
         return refuse(&format!(
             "receipt is stale or future-dated: age {}ms, window ±{}ms",
-            age_ms, FRESHNESS_MS
+            age_ms, RECEIPT_FRESHNESS_MS
         ));
     }
 
@@ -361,12 +377,13 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
     }
 
     // ── All checks passed → write to bus ──────────────────────────────────────
-    let frame_hex =
+    let (frame_hex, real_write) =
         bus::write_enforcement_frame(&state.vcan_iface, &receipt.verdict_id, &receipt.tool);
 
     GatewayResponse::Enforced {
         verdict_id: receipt.verdict_id,
         frame_hex,
+        real_write,
     }
 }
 

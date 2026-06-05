@@ -109,9 +109,14 @@ pub enum GatewayResponse {
 
     /// Receipt verified and action enforced on the bus.
     /// `frame_hex` is the 8-byte CAN frame that was written (real or simulated).
+    /// `real_write` is `true` when a real SocketCAN write was performed; `false`
+    /// when the CI-only simulated bus fallback was used (vcan module absent).
+    /// Defaults to `false` for backward-compatible deserialization.
     Enforced {
         verdict_id: String,
         frame_hex: String,
+        #[serde(default)]
+        real_write: bool,
     },
 
     /// Receipt or grant rejected.  No bus write occurred.
