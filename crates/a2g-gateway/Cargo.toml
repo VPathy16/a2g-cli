@@ -1,0 +1,29 @@
+[package]
+name = "a2g-gateway"
+version = "0.1.0"
+edition = "2021"
+description = "Enforcing Gateway (ADR-0010) — sole writer to the vehicle bus, separate trust domain"
+
+[[bin]]
+name = "a2g-gateway"
+path = "src/main.rs"
+
+[lib]
+name = "a2g_gateway"
+path = "src/lib.rs"
+
+[dependencies]
+a2g-core = { path = "../a2g-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+bs58 = { workspace = true }
