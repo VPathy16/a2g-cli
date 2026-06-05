@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/a2g-core", "crates/a2g-cli", "crates/a2g-ffi"]
+members = ["crates/a2g-core", "crates/a2g-cli", "crates/a2g-ffi", "crates/a2g-gateway"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -21,3 +21,6 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Regex
 regex = "1"
+
+# OS interface (gateway, Linux SocketCAN)
+libc = "0.2"
