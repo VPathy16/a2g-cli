@@ -41,6 +41,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "a2g-demo"
+version = "0.1.0"
+dependencies = [
+ "a2g-core",
+ "a2g-gateway",
+ "bs58",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "libc",
+ "rand",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "a2g-ffi"
 version = "0.1.0"
 dependencies = [
