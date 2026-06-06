@@ -1,0 +1,31 @@
+[package]
+name = "a2g-demo"
+version = "0.1.0"
+edition = "2021"
+description = "A2G governance demo harness — four-beat showcase of the enforcement pipeline"
+
+[lib]
+name = "a2g_demo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "a2g-demo"
+path = "src/main.rs"
+
+[dependencies]
+a2g-core    = { path = "../a2g-core" }
+a2g-gateway = { path = "../a2g-gateway" }
+
+bs58         = { workspace = true }
+chrono       = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex          = { workspace = true }
+libc         = { workspace = true }
+rand         = { workspace = true }
+serde_json   = { workspace = true }
+uuid         = { workspace = true }
+
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
