@@ -3,7 +3,7 @@
 **Title:** A2G Protocol Specification — Agent-to-Governance Authorization Protocol  
 **Version:** 1.0-draft  
 **Status:** Draft — not yet normative  
-**Authors:** Victor Pathiyil and Claude (Anthropic)  
+**Authors:** Victor Pathy and Claude (Anthropic)  
 **License:** Open specification — independent implementations are encouraged  
 
 > This document is an open specification. It defines the A2G protocol as an
