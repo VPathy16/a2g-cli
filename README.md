@@ -199,20 +199,84 @@ Every enforce call writes a signed, hash-chained receipt. Query the ledger:
 
 ---
 
+## Demo — watch the pipeline end-to-end
+
+`a2g-demo` runs four vehicle-action requests through the full enforcement stack and writes the results to a virtual CAN bus. Two requests reach the bus as enforcement frames. Two do not. The silence is the point.
+
+> Full setup guide, screen recording tips, and a non-engineer intro: **[DEMO.md](DEMO.md)**
+
+### Prerequisites
+
+- Linux (kernel ≥ 4.9, `vcan` module) — required for real CAN frames
+- Rust toolchain (`rustup toolchain install stable`)
+
+### Install
+
+```bash
+cargo build --release -p a2g-demo
+```
+
+The binary is at `target/release/a2g-demo`.
+
+### Bring up a virtual CAN interface
+
+```bash
+sudo modprobe vcan
+sudo ip link add dev vcan0 type vcan
+sudo ip link set up vcan0
+```
+
+### Run (two terminal panes)
+
+**Pane 1 — bus listener** (start this first):
+
+```bash
+./target/release/a2g-demo listen --iface vcan0
+```
+
+**Pane 2 — showcase:**
+
+```bash
+./target/release/a2g-demo run --vcan vcan0 --pause
+```
+
+`--pause` waits for Enter between beats — useful for screen recording or live narration.
+
+### What happens
+
+| Beat | Tool | Verdict | Bus |
+|------|------|---------|-----|
+| 1 | `vehicle.climate.set_temperature` | ALLOW | **Frame appears** |
+| 2 | `vehicle.window.set_position` at 120 kph | DENY (speed gate) | **Silent** |
+| 3 | `vehicle.powertrain.set_throttle` — fabricated receipt | Refused (forbidden) | **Silent** |
+| 4 | `vehicle.door.unlock` — HITL Phase-2 ALLOW | ALLOW | **Frame appears** |
+
+Beat 3 is the most important: the agent presents a cryptographically valid signature over a receipt it constructed itself. The gateway's forbidden re-check fires before signature verification and refuses unconditionally. A valid signature is not enough to move a forbidden action onto the bus.
+
+### CI fallback (no vcan0)
+
+```bash
+cargo test -p a2g-demo
+```
+
+Runs all four beats with an embedded gateway and a simulated bus. Asserts the correct outcome for each beat. This is the automated verification path — not the visual demo.
+
+---
+
 ## Status and maturity
 
 | Works today | Roadmap |
 |---|---|
-| Deterministic governance engine (`decide()`) | Standalone enforcing gateway (separate runtime process; today `decide()` is advisory — the mediator is specified, not yet a compiled component) |
-| Four-domain vehicle capability model (Comfort / Convenience / Sensitive / Forbidden) | Embeddable Rust crate with C-ABI for OEM integration |
-| AAOS `VehicleProperty` symbolic-name support (ADR-0006) | Live vehicle-signal ingestion for automatic `VehicleState` population |
-| Fail-safe state gating (omitted state → Sensitive DENY) | Hardware target / bare-metal no_std build (blockers documented in `docs/no_std-blockers.md`) |
-| Signed, hash-chained SQLite ledger with execution lineage | ISO 26262 / ISO 21434 alignment (not a current feature; not claimed) |
+| Deterministic governance engine (`decide()`) | Embeddable Rust crate with C-ABI for OEM integration |
+| Four-domain vehicle capability model (Comfort / Convenience / Sensitive / Forbidden) | Live vehicle-signal ingestion for automatic `VehicleState` population |
+| AAOS `VehicleProperty` symbolic-name support (ADR-0006) | Hardware target / bare-metal no_std build (blockers documented in `docs/no_std-blockers.md`) |
+| Fail-safe state gating (omitted state → Sensitive DENY) | ISO 26262 / ISO 21434 alignment (not a current feature; not claimed) |
+| Signed, hash-chained SQLite ledger with execution lineage | |
 | Pure `a2g-core` crate: no SQLite, no_std-scaffolded, embeddable | |
 | ed25519 mandate signing, revocation, delegation chains | |
-| 73 unit tests, 37 adversarial battle tests | |
-
-**Enforcement is advisory today.** The `decide()` pipeline is deterministic and production-quality, but there is not yet a separate enforcing component that sits as a runtime gateway between the agent process and the VHAL HAL. That component is the next significant milestone.
+| **Enforcing gateway** (`a2g-gateway`) — separate trust domain, socket IPC, SocketCAN write (ADR-0010) | |
+| **End-to-end demo harness** (`a2g-demo`) — four-beat showcase on vcan0 | |
+| 107 unit + integration tests | |
 
 ---
 
@@ -226,6 +290,7 @@ The ADR trail documents every significant design decision and the tradeoffs cons
 | [ADR-0004](docs/adr/0004-pure-decision-path.md) | Pure `decide()` with injected clock; `enforce()` as the std-layer wrapper |
 | [ADR-0005](docs/adr/0005-vehicle-capability-model.md) | Four-domain vehicle capability model — forbidden hard-deny, state gating, fail-safe default |
 | [ADR-0006](docs/adr/0006-aaos-vhal-mapping.md) | AAOS VHAL naming layer — A2G as mediator, backward compatibility, no new no_std blockers |
+| [ADR-0010](docs/adr/0010-enforcing-gateway.md) | Enforcing gateway — separate trust domain, forbidden-first re-check, SocketCAN enforcement, two freshness windows |
 
 VHAL property mapping table: [`docs/aaos-vhal-mapping.md`](docs/aaos-vhal-mapping.md)
 
