@@ -139,7 +139,7 @@ To claim "A2G v1.0 conformant" at any level:
 |---|---|---|---|
 | `01-verdict-semantics` | Core verdict outcomes | 8 | ALLOW / DENY / EXPIRED / PENDING_APPROVAL for each risk tier |
 | `02-forbidden-first` | Forbidden-first guarantee | 6 | Forbidden fires before any mandate check, grant, or escalation |
-| `03-mandate-validation` | Mandate signing and TTL | 6 | Signature check, TTL, spec vs. impl signing payload |
+| `03-mandate-validation` | Mandate signing and TTL | 6 | Signature check, TTL, spec-canonical signing payload |
 | `04-pipeline-ordering` | Step ordering | 9 | Each step fails in the correct order (pre-check → steps 0–7) |
 | `05-attested-state` | Vehicle state gating | 5 | Fail-safe, operator_trusted, state_trust recording |
 | `06-two-phase` | HITL two-phase protocol | 8 | Phase 1 binding, Phase 2 grant validation, parent_receipt_hash |
@@ -151,29 +151,10 @@ To claim "A2G v1.0 conformant" at any level:
 
 ## Known Divergences
 
-Vectors with `"known_failing": true` encode the _spec-correct_ expectation. The reference implementation currently diverges from those vectors. The divergences are documented here; they are not weakened or deleted from the suite.
-
-### mv-004 — Mandate signing payload (§4.5)
-
-**Vector:** `conformance/vectors/03-mandate-validation/mv-004.json`
-
-**SPEC §4.5 specifies:**
-```
-MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>
-```
-where `capabilities_hash = SHA-256(sorted capabilities list joined by ",")`.
-
-**Reference implementation uses:**
-```
-MANDATE:<re-serialized-body-toml>
-```
-The implementation hashes the full re-serialized mandate body (without the `[signature]` section) rather than the structured canonical fields specified in §4.5.
-
-**Impact:** A mandate signed with the spec-canonical payload is rejected by the reference implementation with `mandate_invalid: signature error`. A mandate signed with the implementation payload (`MANDATE:<body>`) is accepted.
-
-**Current status:** Known gap. Existing mandates produced by `a2g sign` remain valid and unaffected (they use the implementation format). Migration to the spec-canonical format requires a version bump and a re-sign migration path; this is tracked as a follow-on item in [docs/adr/](docs/adr/).
-
-**Affected vectors:** mv-004 only. All other mandate-validation vectors exercise the implementation's actual signing path and pass.
+There are currently no known divergences between the reference implementation and
+SPEC.md. All 54 conformance vectors pass. Vectors with `"known_failing": true`
+would appear here with their SPEC references and divergence descriptions; the
+absence of any entry means the suite is fully green.
 
 ---
 

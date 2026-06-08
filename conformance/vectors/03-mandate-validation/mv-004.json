@@ -2,9 +2,9 @@
   "id": "mv-004",
   "spec_ref": "§4.5",
   "category": "mandate-validation",
-  "description": "KNOWN-FAILING: Mandate signed with spec-canonical payload MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash> is rejected by the implementation which uses MANDATE:<re-serialized-body>. Per SPEC §4.5 this should be ALLOW.",
-  "known_failing": true,
-  "known_failing_reason": "Implementation uses MANDATE:<re-serialized-body> as signing payload (SPEC Appendix A.1). The spec-canonical format MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash> is not yet implemented.",
+  "description": "Mandate signed with spec-canonical payload MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash> is accepted — implementation now uses the spec-canonical format.",
+  "known_failing": false,
+  "known_failing_reason": null,
   "input": {
     "mandate_capabilities": ["vehicle.climate.set_temperature"],
     "mandate_escalate_tools": [],

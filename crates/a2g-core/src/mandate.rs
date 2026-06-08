@@ -227,29 +227,45 @@ escalate_to = ""
     )
 }
 
-/// Compute the canonical hash of the mandate body (everything except [signature])
-#[allow(dead_code)]
-fn canonical_body(mandate_str: &str) -> String {
-    let mut lines: Vec<&str> = Vec::new();
-    let mut in_sig_section = false;
+/// Compute the `capabilities_hash` component of the canonical signing payload.
+///
+/// **Algorithm (SPEC §4.5):**
+/// 1. Sort `tools` lexicographically (ascending byte order of UTF-8 strings).
+/// 2. Join with U+000A NEWLINE (`\n`). Empty list → empty string.
+/// 3. SHA-256 of the UTF-8 bytes of the joined string.
+/// 4. Hex-encode the digest (lowercase).
+///
+/// This exact procedure is normative — changing the sort order, separator, or
+/// hash algorithm produces a different value and breaks all existing signatures.
+pub fn capabilities_hash(tools: &[String]) -> String {
+    let mut sorted = tools.to_vec();
+    sorted.sort();
+    let joined = sorted.join("\n");
+    hex::encode(Sha256::digest(joined.as_bytes()))
+}
 
-    for line in mandate_str.lines() {
-        if line.trim() == "[signature]" {
-            in_sig_section = true;
-            continue;
-        }
-        if in_sig_section {
-            // Skip all lines in [signature] section
-            if line.starts_with('[') && line.trim() != "[signature]" {
-                in_sig_section = false;
-            } else {
-                continue;
-            }
-        }
-        lines.push(line);
-    }
-
-    lines.join("\n")
+/// Construct the canonical mandate signing payload (SPEC §4.5).
+///
+/// ```text
+/// MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>
+/// ```
+///
+/// The `MANDATE:` domain-separation prefix ensures this payload cannot be valid
+/// in any other A2G signing context. The signer and verifier both call this
+/// function so the payload is never assembled independently in two places.
+pub fn mandate_signing_payload(
+    agent_did: &str,
+    issuer_did: &str,
+    expires_at: &str,
+    tools: &[String],
+) -> String {
+    format!(
+        "MANDATE:{}:{}:{}:{}",
+        agent_did,
+        issuer_did,
+        expires_at,
+        capabilities_hash(tools)
+    )
 }
 
 /// Sign a mandate with a sovereign ed25519 key
@@ -279,16 +295,20 @@ pub fn sign_mandate(
     );
     mandate.mandate.issuer = issuer_did;
 
-    // Remove old signature for serialization
-    mandate.signature = None;
-
-    // Serialize body (without signature)
-    let body_str = toml::to_string_pretty(&mandate)?;
-
-    // Domain separation: prefix body hash with type tag to prevent cross-type replay
-    let body_to_hash = format!("MANDATE:{}", body_str);
-    let body_hash = Sha256::digest(body_to_hash.as_bytes());
+    // Build canonical signing payload (SPEC §4.5):
+    //   MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>
+    let payload = mandate_signing_payload(
+        &mandate.mandate.agent_did,
+        &mandate.mandate.issuer,
+        &mandate.mandate.expires_at,
+        &mandate.capabilities.tools,
+    );
+    let body_hash = Sha256::digest(payload.as_bytes());
     let signature = signing_key.sign(&body_hash);
+
+    // Remove old signature before serializing the TOML body
+    mandate.signature = None;
+    let body_str = toml::to_string_pretty(&mandate)?;
 
     // Build final TOML with signature section
     let signed_toml = format!(
@@ -314,12 +334,16 @@ pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, Box<dyn std::err
         return Err(format!("unsupported algorithm: {}", sig.algorithm).into());
     }
 
-    // 3. Reconstruct body for verification
+    // 3. Reconstruct canonical signing payload for verification (SPEC §4.5)
     let mut verify_mandate = mandate;
     let sig_clone = verify_mandate.signature.take().unwrap();
-    let body_str = toml::to_string_pretty(&verify_mandate)?;
-    let body_to_hash = format!("MANDATE:{}", body_str);
-    let body_hash = Sha256::digest(body_to_hash.as_bytes());
+    let payload = mandate_signing_payload(
+        &verify_mandate.mandate.agent_did,
+        &verify_mandate.mandate.issuer,
+        &verify_mandate.mandate.expires_at,
+        &verify_mandate.capabilities.tools,
+    );
+    let body_hash = Sha256::digest(payload.as_bytes());
 
     // 4. Verify ed25519 signature
     let pubkey_bytes = hex::decode(&sig_clone.issuer_pubkey)?;
@@ -379,9 +403,13 @@ pub fn verify_signature(mandate_str: &str) -> Result<(), Box<dyn std::error::Err
     }
     let mut m = mandate;
     let sig_clone = m.signature.take().unwrap();
-    let body_str = toml::to_string_pretty(&m)?;
-    let body_to_hash = format!("MANDATE:{}", body_str);
-    let body_hash = Sha256::digest(body_to_hash.as_bytes());
+    let payload = mandate_signing_payload(
+        &m.mandate.agent_did,
+        &m.mandate.issuer,
+        &m.mandate.expires_at,
+        &m.capabilities.tools,
+    );
+    let body_hash = Sha256::digest(payload.as_bytes());
     let pubkey_bytes = hex::decode(&sig_clone.issuer_pubkey)?;
     let pubkey_arr: [u8; 32] = pubkey_bytes
         .as_slice()
@@ -428,5 +456,72 @@ mod tests {
         let template = generate_template("my-agent", "did:a2g:test123");
         assert!(template.contains("my-agent"));
         assert!(template.contains("did:a2g:test123"));
+    }
+
+    /// Asserts the exact byte layout of the canonical signing payload so a future
+    /// serializer or formatting change cannot silently drift from SPEC §4.5.
+    ///
+    /// Payload: `MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>`
+    /// capabilities_hash: SHA-256(tools sorted lexicographically, joined with `\n`)
+    #[test]
+    fn test_signing_payload_exact_bytes() {
+        // Fixed inputs — do not change without bumping the mandate schema version.
+        let agent_did = "did:a2g:AgentAAA";
+        let issuer_did = "did:a2g:IssuerBBB";
+        let expires_at = "2099-01-01T00:00:00Z";
+        let tools = vec![
+            "vehicle.door.unlock".to_string(),
+            "vehicle.climate.set_temperature".to_string(),
+        ];
+
+        // Sorted lexicographically:
+        //   vehicle.climate.set_temperature
+        //   vehicle.door.unlock
+        // Joined with \n:
+        //   "vehicle.climate.set_temperature\nvehicle.door.unlock"
+        let expected_joined = "vehicle.climate.set_temperature\nvehicle.door.unlock";
+        let expected_cap_hash = hex::encode(Sha256::digest(expected_joined.as_bytes()));
+
+        let expected_payload = format!(
+            "MANDATE:{}:{}:{}:{}",
+            agent_did, issuer_did, expires_at, expected_cap_hash
+        );
+
+        let actual_payload = mandate_signing_payload(agent_did, issuer_did, expires_at, &tools);
+
+        assert_eq!(
+            actual_payload, expected_payload,
+            "Signing payload byte layout has drifted from SPEC §4.5. \
+             Changing this is a breaking protocol change — update CHANGELOG."
+        );
+
+        // Also assert capabilities_hash directly.
+        assert_eq!(capabilities_hash(&tools), expected_cap_hash);
+    }
+
+    #[test]
+    fn test_capabilities_hash_sort_order() {
+        // Unsorted input must produce the same hash as sorted input.
+        let tools_unsorted = vec![
+            "z_tool".to_string(),
+            "a_tool".to_string(),
+            "m_tool".to_string(),
+        ];
+        let tools_sorted = vec![
+            "a_tool".to_string(),
+            "m_tool".to_string(),
+            "z_tool".to_string(),
+        ];
+        assert_eq!(
+            capabilities_hash(&tools_unsorted),
+            capabilities_hash(&tools_sorted)
+        );
+    }
+
+    #[test]
+    fn test_capabilities_hash_empty() {
+        // Empty capability list: SHA-256 of "" (empty string).
+        let expected = hex::encode(Sha256::digest(b""));
+        assert_eq!(capabilities_hash(&[]), expected);
     }
 }
