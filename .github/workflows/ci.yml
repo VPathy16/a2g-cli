@@ -65,6 +65,15 @@ jobs:
              -o smoke_test_bin
           ./smoke_test_bin
 
+      - name: Build and run C integration example
+        run: |
+          LIB=$(pwd)/target/release
+          INC=$(pwd)/crates/a2g-ffi/include
+          make -C examples/c_integration \
+               A2G_LIB_DIR="$LIB" \
+               A2G_INCLUDE="$INC"
+          examples/c_integration/a2g_integration
+
       - name: aarch64 cross-compile check (build only)
         run: |
           rustup target add aarch64-unknown-linux-gnu
