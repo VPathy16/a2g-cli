@@ -1,0 +1,36 @@
+{
+  "id": "mv-004",
+  "spec_ref": "§4.5",
+  "category": "mandate-validation",
+  "description": "KNOWN-FAILING: Mandate signed with spec-canonical payload MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash> is rejected by the implementation which uses MANDATE:<re-serialized-body>. Per SPEC §4.5 this should be ALLOW.",
+  "known_failing": true,
+  "known_failing_reason": "Implementation uses MANDATE:<re-serialized-body> as signing payload (SPEC Appendix A.1). The spec-canonical format MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash> is not yet implemented.",
+  "input": {
+    "mandate_capabilities": ["vehicle.climate.set_temperature"],
+    "mandate_escalate_tools": [],
+    "mandate_expires_in_hours": 24,
+    "mandate_bad_signature": false,
+    "mandate_use_spec_signing": true,
+    "mandate_workspace_root": null,
+    "mandate_operating_hours": null,
+    "mandate_rate_limit": 120,
+    "mandate_fs_deny": [],
+    "mandate_fs_read": [],
+    "mandate_fs_write": [],
+    "capability": "vehicle.climate.set_temperature",
+    "params": {},
+    "state_speed_kph": null,
+    "state_gear": null,
+    "state_actor": null,
+    "state_trust": null,
+    "clock_offset_seconds": 0,
+    "phase2_grant_type": null,
+    "gateway_test_type": null
+  },
+  "expected": {
+    "verdict": "ALLOW",
+    "policy_rule_contains": null,
+    "gateway_enforced": null,
+    "gateway_refused_reason_contains": null
+  }
+}

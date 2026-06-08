@@ -23,6 +23,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "a2g-conformance"
+version = "0.1.0"
+dependencies = [
+ "a2g-core",
+ "a2g-gateway",
+ "bs58",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "a2g-core"
 version = "0.1.0"
 dependencies = [

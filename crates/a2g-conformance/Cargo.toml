@@ -1,0 +1,24 @@
+[package]
+name = "a2g-conformance"
+version = "0.1.0"
+edition = "2021"
+description = "Protocol conformance test suite for A2G (SPEC.md §10)"
+
+[[bin]]
+name = "a2g-conformance"
+path = "src/main.rs"
+
+[dependencies]
+a2g-core = { path = "../a2g-core" }
+a2g-gateway = { path = "../a2g-gateway" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+bs58 = { workspace = true }
+uuid = { workspace = true }
+toml = { workspace = true }
+tempfile = "3"
