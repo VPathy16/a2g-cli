@@ -2,7 +2,7 @@
   "id": "mv-003",
   "spec_ref": "§4.5, §5.5",
   "category": "mandate-validation",
-  "description": "Mandate with domain-separation prefix MANDATE: correctly validates (implementation uses MANDATE:<body>)",
+  "description": "MANDATE: domain-separation prefix correctly scopes the signature — mandate signed and verified with spec-canonical payload (§4.5) produces ALLOW",
   "known_failing": false,
   "known_failing_reason": null,
   "input": {

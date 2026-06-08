@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Breaking
 
+- **Mandate signing payload changed to SPEC §4.5 canonical format** (breaking protocol change).
+  The signing payload is now `MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>`
+  where `capabilities_hash = SHA-256(tools sorted lexicographically, joined with `\n`)`.
+  Previously the payload was `MANDATE:<re-serialized-toml-body>`.
+  All mandates signed before this change will fail signature verification and must be re-signed
+  with `a2g sign`. No dual-accept fallback is provided — one canonical format, the spec's.
+
 - `a2g sign` without `--proposal` or `--skip-proposal` now exits non-zero with a guidance message
   instead of silently signing in backwards-compatible mode. Callers must supply one of:
   - `--proposal <file>` — full governance verification (proposal hash, status, expiry)

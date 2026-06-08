@@ -230,10 +230,12 @@ fn tamper_signature(signed_toml: &str) -> String {
         .join("\n")
 }
 
-/// Build a mandate signed with the spec-canonical payload (known-failing for this implementation).
+/// Build a mandate signed with the SPEC §4.5 canonical payload.
 ///
-/// Spec §4.5: `MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>`
-/// Implementation uses: `MANDATE:<re-serialized-body-toml>` (Appendix A.1)
+/// After the fix/mandate-signing-payload change, the implementation now uses this
+/// same canonical format, so this function and `build_mandate` produce compatible
+/// mandates. The function is kept separate so mv-004 explicitly exercises the
+/// spec-canonical path end-to-end.
 fn build_spec_signed_mandate(input: &VectorInput) -> String {
     use chrono::Duration;
     use ed25519_dalek::Signer;
@@ -253,15 +255,11 @@ fn build_spec_signed_mandate(input: &VectorInput) -> String {
         bs58::encode(&issuer_pubkey_bytes).into_string()
     );
 
-    let tools_sorted = {
-        let mut v = input.mandate_capabilities.clone();
-        v.sort();
-        v
-    };
-    let capabilities_hash = hex::encode(Sha256::digest(tools_sorted.join(",").as_bytes()));
+    // capabilities_hash: sort lexicographically, join with \n, SHA-256 (SPEC §4.5)
+    let cap_hash = a2g_core::mandate::capabilities_hash(&input.mandate_capabilities);
 
     // Spec-canonical signing payload (§4.5)
-    let canonical = format!("MANDATE:{agent_did}:{issuer_did}:{expires_at}:{capabilities_hash}");
+    let canonical = format!("MANDATE:{agent_did}:{issuer_did}:{expires_at}:{cap_hash}");
     let payload_hash = Sha256::digest(canonical.as_bytes());
     let sig: ed25519_dalek::Signature = signing_key.sign(&payload_hash);
     let sig_hex = hex::encode(sig.to_bytes());

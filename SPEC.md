@@ -382,9 +382,16 @@ MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>
 Where:
 - `MANDATE:` is a domain-separation prefix. This prefix ensures that a mandate
   signature cannot be valid in any other A2G signing context.
-- `<capabilities_hash>` is the SHA-256 hex digest of the UTF-8 serialization of
-  the `[capabilities]` section, canonicalized by sorting tool names
-  lexicographically before hashing.
+- `<capabilities_hash>` is computed as follows (all steps are normative):
+  1. Collect the `[capabilities].tools` list.
+  2. Sort the tool names lexicographically in ascending byte order (UTF-8 string comparison).
+  3. Join with a single U+000A LINE FEED (`\n`) character. An empty list produces the empty string `""`.
+  4. Compute SHA-256 over the UTF-8 encoding of the joined string.
+  5. Hex-encode the digest using lowercase hex digits (64 characters).
+
+  Changing the sort order, separator, or hash algorithm produces a different
+  `capabilities_hash` and breaks all existing signatures. Implementations MUST
+  follow this procedure exactly.
 - Fields are joined with `:` as the delimiter. Empty optional fields are included
   as empty strings to maintain a fixed structure.
 
@@ -1227,23 +1234,7 @@ This appendix records known divergences between the normative requirements of th
 specification and the current reference implementation. These divergences do not
 weaken the normative text; they identify work needed to achieve full conformance.
 
-### A.1 Mandate Signing Payload
-
-**Normative (§4.5):** The canonical signing payload is
-`MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>`.
-
-**Current implementation status:** The reference implementation signs over a
-different payload format. The exact payload used in the current implementation
-should be treated as an implementation detail until a future version of this
-specification or the reference implementation aligns them. Verifiers MUST use the
-payload format documented in the mandate's own schema version field once
-versioning is introduced.
-
-**Impact:** Mandates signed by the reference implementation may not verify under
-a strict reading of §4.5. This will be resolved in a future update to either the
-specification or the implementation.
-
-### A.2 Binding-Signing Key in the Rich Domain (Demo Tier)
+### A.1 Binding-Signing Key in the Rich Domain (Demo Tier)
 
 **Normative (§9.8, §11.1):** The binding-signing key MUST reside in the Enforcing
 Gateway.
@@ -1257,7 +1248,7 @@ end-to-end demonstration of the protocol. It is not suitable for production.
 key into the gateway. The gateway implementation (`a2g-gateway`) is the intended
 home for this key; the migration is planned as a follow-on.
 
-### A.3 Operator Identity Infrastructure
+### A.2 Operator Identity Infrastructure
 
 **Normative (§9.7):** The gateway MUST verify the operator's `ApprovalGrant`
 signature against a known operator public key.
@@ -1267,7 +1258,7 @@ key pair with no key infrastructure, revocation support, or certificate hierarch
 This is sufficient for demonstrating the protocol. Production deployment requires
 a defined operator PKI.
 
-### A.4 Pending Queue Persistence
+### A.3 Pending Queue Persistence
 
 **Normative (§11.6):** Production deployments requiring durability MUST use
 persistent queue storage.
@@ -1275,14 +1266,14 @@ persistent queue storage.
 **Current implementation status:** The gateway's pending queue is in-memory only.
 Queue entries are lost on gateway restart. This is acceptable for the demo tier.
 
-### A.5 Receipt Freshness Window Directionality
+### A.4 Receipt Freshness Window Directionality
 
 **Normative (§9.6):** The receipt freshness check is bidirectional (±2000 ms).
 
 **Current implementation status:** Implemented as specified. The attested-state
 freshness check (500 ms, unidirectional) is also implemented as specified.
 
-### A.6 Wire Transport
+### A.5 Wire Transport
 
 **Normative (§9.4):** This specification does not mandate a specific wire format.
 
