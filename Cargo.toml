@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/a2g-core", "crates/a2g-cli", "crates/a2g-ffi", "crates/a2g-gateway", "crates/a2g-demo"]
+members = ["crates/a2g-core", "crates/a2g-cli", "crates/a2g-ffi", "crates/a2g-gateway", "crates/a2g-demo", "crates/a2g-conformance"]
 resolver = "2"
 
 [workspace.dependencies]
