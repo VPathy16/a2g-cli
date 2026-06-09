@@ -29,3 +29,6 @@ venv/
 
 # Test artifacts
 /tests/battle_*/
+
+# C integration example binary
+/examples/c_integration/a2g_integration
