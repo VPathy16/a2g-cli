@@ -52,7 +52,7 @@ static PREV_HASH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None)
 /// Must be called once at startup before any generate_receipt() calls
 /// to maintain chain integrity across process restarts.
 pub fn init_chain_from_ledger(last_hash: Option<String>) {
-    *PREV_HASH.lock().unwrap() = last_hash;
+    *PREV_HASH.lock().unwrap_or_else(|e| e.into_inner()) = last_hash;
 }
 
 /// Generate a receipt from a verdict
@@ -63,7 +63,7 @@ pub fn generate_receipt(verdict: &Verdict) -> Receipt {
     // Get the previous hash for chain linking
     let prev_hash = PREV_HASH
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .clone()
         .unwrap_or_else(|| "0".repeat(64)); // Genesis hash
 
@@ -114,7 +114,7 @@ pub fn generate_receipt(verdict: &Verdict) -> Receipt {
     let receipt_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
 
     // Update chain
-    *PREV_HASH.lock().unwrap() = Some(receipt_hash.clone());
+    *PREV_HASH.lock().unwrap_or_else(|e| e.into_inner()) = Some(receipt_hash.clone());
 
     Receipt {
         receipt_id,
@@ -192,7 +192,8 @@ pub fn verify_chain(receipts: &[Receipt]) -> Result<(), String> {
     }
 
     // Verify first receipt points to genesis
-    if receipts[0].prev_hash != "0".repeat(64) {
+    let genesis = "0".repeat(64);
+    if receipts.first().map(|r| r.prev_hash.as_str()) != Some(genesis.as_str()) {
         return Err("first receipt does not point to genesis hash".to_string());
     }
 
@@ -204,12 +205,14 @@ pub fn verify_chain(receipts: &[Receipt]) -> Result<(), String> {
     }
 
     // Verify chain links
-    for i in 1..receipts.len() {
-        if receipts[i].prev_hash != receipts[i - 1].receipt_hash {
-            return Err(format!(
-                "chain broken at receipt {}: prev_hash does not match previous receipt_hash",
-                i
-            ));
+    for (i, window) in receipts.windows(2).enumerate() {
+        if let [prev, curr] = window {
+            if curr.prev_hash != prev.receipt_hash {
+                return Err(format!(
+                    "chain broken at receipt {}: prev_hash does not match previous receipt_hash",
+                    i.saturating_add(1)
+                ));
+            }
         }
     }
 
@@ -218,6 +221,14 @@ pub fn verify_chain(receipts: &[Receipt]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::integer_division,
+        clippy::panic
+    )]
     use super::*;
     use crate::enforce::{Decision, Verdict};
     use chrono::Utc;

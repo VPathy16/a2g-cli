@@ -165,30 +165,30 @@ pub fn assess_risk(mandate_str: &str) -> Result<RiskLevel, Box<dyn std::error::E
     for tool in &m.capabilities.tools {
         let t = tool.to_lowercase();
         if exec_tools.iter().any(|e| t.contains(e)) {
-            score += 3;
+            score = score.saturating_add(3);
         } else if write_tools.iter().any(|w| t.contains(w))
             || net_tools.iter().any(|n| t.contains(n))
         {
-            score += 2;
+            score = score.saturating_add(2);
         } else {
-            score += 1;
+            score = score.saturating_add(1);
         }
     }
 
     // Boundary risk scoring
     if m.boundaries.fs_deny.is_empty() {
-        score += 3; // No deny rules is dangerous
+        score = score.saturating_add(3); // No deny rules is dangerous
     }
     if m.boundaries.net_deny.is_empty() && !m.boundaries.net_allow.is_empty() {
-        score += 2; // Network access without deny rules
+        score = score.saturating_add(2); // Network access without deny rules
     }
     if !m.boundaries.cmd_allow.is_empty() {
-        score += 2; // Command execution
+        score = score.saturating_add(2); // Command execution
     }
 
     // Rate limit risk
     if m.limits.max_calls_per_minute > 120 {
-        score += 2;
+        score = score.saturating_add(2);
     }
 
     // Classify
@@ -212,7 +212,10 @@ pub fn create_proposal(
     let required_approvals = risk_level.required_approvals();
 
     let now = Utc::now();
-    let expires = now + chrono::Duration::hours(proposal_ttl_hours as i64);
+    let ttl_hours_i64 = i64::try_from(proposal_ttl_hours).unwrap_or(i64::MAX);
+    let expires = now
+        .checked_add_signed(chrono::Duration::hours(ttl_hours_i64))
+        .unwrap_or(now);
     let mandate_hash = hex::encode(Sha256::digest(mandate_body.as_bytes()));
     let proposal_id = uuid::Uuid::new_v4().to_string();
 
@@ -389,6 +392,14 @@ pub fn verify_review(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use crate::identity;

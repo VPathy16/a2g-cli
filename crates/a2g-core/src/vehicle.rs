@@ -697,7 +697,7 @@ impl AttestedVehicleState {
                     .attested_at
                     .parse::<chrono::DateTime<chrono::Utc>>()
                     .map_err(|_| AttestationError::Stale)?;
-                let age_ms = (now - attested).num_milliseconds();
+                let age_ms = now.signed_duration_since(attested).num_milliseconds();
                 if !(0..=freshness_ms).contains(&age_ms) {
                     return Err(AttestationError::Stale);
                 }
@@ -777,6 +777,14 @@ impl VerifiedVehicleState {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 

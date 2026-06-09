@@ -52,13 +52,13 @@ pub fn govern_output(response: &str, rules: &OutputGovernance) -> OutputVerdict 
 
     // Step 2: Apply redaction patterns
     let mut content = response.to_string();
-    let mut redact_count = 0;
+    let mut redact_count: usize = 0;
 
     for pattern_str in &rules.redact_patterns {
         match RegexBuilder::new(pattern_str).size_limit(100_000).build() {
             Ok(re) => {
                 let matches: Vec<_> = re.find_iter(&content).collect();
-                redact_count += matches.len();
+                redact_count = redact_count.saturating_add(matches.len());
                 content = re.replace_all(&content, "[REDACTED]").to_string();
             }
             Err(e) => {
@@ -70,14 +70,19 @@ pub fn govern_output(response: &str, rules: &OutputGovernance) -> OutputVerdict 
 
     // Step 3: Check length (byte-safe truncation)
     let max_len = rules.max_output_length;
-    if max_len > 0 && content.len() as u64 > max_len {
+    // Compare lengths safely without truncating cast.
+    let content_len_u64 = u64::try_from(content.len()).unwrap_or(u64::MAX);
+    if max_len > 0 && content_len_u64 > max_len {
         let original_len = content.len();
-        // Find a safe UTF-8 boundary at or before max_len
-        let mut end = max_len as usize;
+        // max_len < content.len() <= usize::MAX, so max_len fits in usize.
+        let end_max = usize::try_from(max_len).unwrap_or(original_len).min(original_len);
+        let mut end = end_max;
+        // Walk back to a valid UTF-8 char boundary; end > 0 ensures no underflow.
         while end > 0 && !content.is_char_boundary(end) {
-            end -= 1;
+            end = end.saturating_sub(1);
         }
-        content = content[..end].to_string();
+        // SAFETY: end is a valid char boundary within [0, content.len()].
+        content = content.get(..end).unwrap_or("").to_string();
         content.push_str("\n[TRUNCATED BY A2G GOVERNANCE]");
         return OutputVerdict {
             action: OutputAction::Truncated {
@@ -105,6 +110,14 @@ pub fn govern_output(response: &str, rules: &OutputGovernance) -> OutputVerdict 
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use crate::mandate::OutputGovernance;

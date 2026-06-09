@@ -141,7 +141,11 @@ impl ApprovalGrant {
         now: DateTime<Utc>,
         parent_receipt_hash: &str,
     ) -> Self {
-        let expires_at = (now + Duration::seconds(ttl_seconds as i64)).to_rfc3339();
+        let ttl_secs = i64::try_from(ttl_seconds).unwrap_or(i64::MAX);
+        let expires_at = now
+            .checked_add_signed(Duration::seconds(ttl_secs))
+            .unwrap_or(now)
+            .to_rfc3339();
         let approver_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
         let payload_hash = Self::payload_hash(binding_id, request_hash, &expires_at);
         let sig: Signature = signing_key.sign(&payload_hash);
