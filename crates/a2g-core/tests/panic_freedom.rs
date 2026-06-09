@@ -264,8 +264,18 @@ fn valid_speed_parked_produces_integer_verdict() {
     let vs = VerifiedVehicleState::from_operator_trusted(state);
     let mandate = valid_mandate(&["WINDOW_POS"]);
     let params = serde_json::json!({});
-    let result = decide(&mandate, "WINDOW_POS", &params, &NoopLedger, Utc::now(), Some(&vs));
-    assert!(result.is_ok(), "parked state must produce a verdict, not error");
+    let result = decide(
+        &mandate,
+        "WINDOW_POS",
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        Some(&vs),
+    );
+    assert!(
+        result.is_ok(),
+        "parked state must produce a verdict, not error"
+    );
     // Parked + permitted tool → ALLOW (state gate passes, no escalation configured)
     assert_eq!(result.unwrap().decision, Decision::Allow);
 }

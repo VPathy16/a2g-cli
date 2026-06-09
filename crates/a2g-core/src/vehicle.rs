@@ -1115,7 +1115,7 @@ mod tests {
     #[test]
     fn test_speed_below_threshold_but_not_park_denies() {
         let state = VehicleState {
-            speed_mmps: 833, // 3.0 km/h
+            speed_mmps: 833,   // 3.0 km/h
             gear: Gear::Drive, // still in Drive
             actor: Actor::Passenger,
         };
