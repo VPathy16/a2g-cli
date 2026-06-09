@@ -96,14 +96,14 @@ proptest! {
         err_resolves_to_deny(result);
     }
 
-    /// Extreme f64 speed values (NaN, inf, negative, i64::MAX as f64) must not
-    /// cause the vehicle state functions to panic. The functions must either
-    /// return a safe value or propagate an error.
+    /// Arbitrary u32 speed values (no float on the decision path) must not panic.
+    /// decide() only ever sees validated integer speed — this proves the fixed-point
+    /// domain is panic-free for all representable u32 values.
     #[test]
-    fn prop_extreme_speed_never_panics(
-        speed_kph in prop::num::f64::ANY,
-        gear_int  in 0u32..=3,
-        actor_int in 0u32..=1,
+    fn prop_arbitrary_speed_mmps_never_panics(
+        speed_mmps in prop::num::u32::ANY,
+        gear_int   in 0u32..=3,
+        actor_int  in 0u32..=1,
     ) {
         let gear = match gear_int {
             0 => Gear::Park,
@@ -112,13 +112,22 @@ proptest! {
             _ => Gear::Neutral,
         };
         let actor = if actor_int == 0 { Actor::Driver } else { Actor::Passenger };
-        let state = VehicleState { speed_kph, gear, actor };
+        let state = VehicleState { speed_mmps, gear, actor };
         let vs = VerifiedVehicleState::from_operator_trusted(state);
-        // The state evaluation itself must not panic.
         let mandate = valid_mandate(&["read_file"]);
         let params = serde_json::json!({});
         let result = decide(&mandate, "read_file", &params, &NoopLedger, Utc::now(), Some(&vs));
         err_resolves_to_deny(result);
+    }
+
+    /// Any f64 float at the ingress boundary must not panic: valid inputs convert,
+    /// invalid inputs (NaN/inf/negative/subnormal/out-of-range) return Err.
+    #[test]
+    fn prop_boundary_float_to_mmps_never_panics(
+        speed_kph in prop::num::f64::ANY,
+    ) {
+        // The boundary conversion must not panic regardless of input.
+        let _ = a2g_core::vehicle::speed_kph_to_mmps(speed_kph);
     }
 
     /// Empty, oversized, or unicode-heavy tool names must produce a verdict, not a panic.
@@ -212,51 +221,78 @@ fn null_bytes_in_mandate_not_panic() {
 }
 
 #[test]
-fn nan_speed_not_panic() {
-    let state = VehicleState {
-        speed_kph: f64::NAN,
-        gear: Gear::Park,
-        actor: Actor::Driver,
-    };
-    let vs = VerifiedVehicleState::from_operator_trusted(state);
-    let mandate = valid_mandate(&["WINDOW_POS"]);
-    let params = serde_json::json!({});
-    // Must return a verdict (DENY due to NaN speed failing parked check) — not panic.
-    let result = decide(
-        &mandate,
-        "WINDOW_POS",
-        &params,
-        &NoopLedger,
-        Utc::now(),
-        Some(&vs),
-    );
+fn nan_speed_rejected_at_boundary() {
+    // NaN is rejected at the float→fixed-point boundary, never reaches decide().
     assert!(
-        result.is_ok(),
-        "NaN speed must produce a verdict, not panic"
+        a2g_core::vehicle::speed_kph_to_mmps(f64::NAN).is_err(),
+        "NaN speed must be rejected at ingress boundary"
     );
-    assert_eq!(result.unwrap().decision, Decision::Deny);
 }
 
 #[test]
-fn inf_speed_not_panic() {
+fn inf_speed_rejected_at_boundary() {
+    assert!(
+        a2g_core::vehicle::speed_kph_to_mmps(f64::INFINITY).is_err(),
+        "+Inf speed must be rejected at ingress boundary"
+    );
+    assert!(
+        a2g_core::vehicle::speed_kph_to_mmps(f64::NEG_INFINITY).is_err(),
+        "-Inf speed must be rejected at ingress boundary"
+    );
+}
+
+#[test]
+fn negative_speed_rejected_at_boundary() {
+    assert!(a2g_core::vehicle::speed_kph_to_mmps(-1.0).is_err());
+    assert!(a2g_core::vehicle::speed_kph_to_mmps(-0.001).is_err());
+}
+
+#[test]
+fn out_of_range_speed_rejected_at_boundary() {
+    assert!(a2g_core::vehicle::speed_kph_to_mmps(1_001.0).is_err());
+    assert!(a2g_core::vehicle::speed_kph_to_mmps(f64::MAX).is_err());
+}
+
+#[test]
+fn valid_speed_parked_produces_integer_verdict() {
+    // Proves the parked gate works in pure integer space: no float on this path.
     let state = VehicleState {
-        speed_kph: f64::INFINITY,
+        speed_mmps: 0, // 0 km/h — clearly parked
         gear: Gear::Park,
         actor: Actor::Driver,
     };
     let vs = VerifiedVehicleState::from_operator_trusted(state);
     let mandate = valid_mandate(&["WINDOW_POS"]);
     let params = serde_json::json!({});
+    let result = decide(&mandate, "WINDOW_POS", &params, &NoopLedger, Utc::now(), Some(&vs));
+    assert!(result.is_ok(), "parked state must produce a verdict, not error");
+    // Parked + permitted tool → ALLOW (state gate passes, no escalation configured)
+    assert_eq!(result.unwrap().decision, Decision::Allow);
+}
+
+#[test]
+fn moving_speed_denies_sensitive_in_integer_space() {
+    // 8333 mm/s ≈ 30 km/h: above SPEED_GATE_MMPS (1389) → DENY from state gate.
+    let state = VehicleState {
+        speed_mmps: 8_333,
+        gear: Gear::Drive,
+        actor: Actor::Driver,
+    };
+    let vs = VerifiedVehicleState::from_operator_trusted(state);
+    let mandate = valid_mandate(&["vehicle.window.set_position"]);
+    let params = serde_json::json!({});
     let result = decide(
         &mandate,
-        "WINDOW_POS",
+        "vehicle.window.set_position",
         &params,
         &NoopLedger,
         Utc::now(),
         Some(&vs),
     );
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().decision, Decision::Deny);
+    let v = result.unwrap();
+    assert_eq!(v.decision, Decision::Deny);
+    assert!(v.policy_rule.contains("vehicle_state_violation"));
 }
 
 #[test]

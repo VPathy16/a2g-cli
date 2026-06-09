@@ -196,7 +196,7 @@ fn beat2_state_gated_deny(socket_path: &Path, demo_keys: &DemoKeys) -> String {
     let params_json = r#"{"position_pct": 100}"#;
     let mandate = make_mandate(&[tool], &[]);
     let moving = VerifiedVehicleState::from_operator_trusted(VehicleState {
-        speed_kph: 120.0,
+        speed_mmps: 33_333, // 120.0 km/h
         gear: Gear::Drive,
         actor: Actor::Driver,
     });
@@ -339,7 +339,7 @@ fn beat4_hitl_door_unlock(socket_path: &Path, demo_keys: &DemoKeys) -> GatewayRe
     let params_json = r#"{"door": "all"}"#;
     let mandate = make_mandate(&[tool], &[tool]);
     let parked = VerifiedVehicleState::from_operator_trusted(VehicleState {
-        speed_kph: 0.0,
+        speed_mmps: 0,
         gear: Gear::Park,
         actor: Actor::Driver,
     });

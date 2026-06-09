@@ -316,6 +316,8 @@ signed_at = "{issued_at}"
 
 fn build_vehicle_state(input: &VectorInput) -> Option<VerifiedVehicleState> {
     let speed_kph = input.state_speed_kph?;
+    // Validate and convert at the boundary — NaN/inf/negative/subnormal/out-of-range → None.
+    let speed_mmps = a2g_core::vehicle::speed_kph_to_mmps(speed_kph).ok()?;
     let gear = match input.state_gear.as_deref().unwrap_or("Park") {
         "Park" => Gear::Park,
         "Drive" => Gear::Drive,
@@ -329,7 +331,7 @@ fn build_vehicle_state(input: &VectorInput) -> Option<VerifiedVehicleState> {
         _ => Actor::Driver,
     };
     let state = VehicleState {
-        speed_kph,
+        speed_mmps,
         gear,
         actor,
     };

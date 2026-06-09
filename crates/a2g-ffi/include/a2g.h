@@ -161,13 +161,18 @@ const char *a2g_verdict_binding_json(const struct A2gVerdictHandle *handle);
 // remains host-side and is not exposed across this ABI.
 //
 // # Parameters
-// - `speed_kph`  — vehicle speed in km/h (must be ≥ 0).
+// - `speed_kph`  — vehicle speed in km/h. Validated and converted to mm/s at this
+//                  boundary. Returns NULL (fail-safe DENY) if the value is NaN,
+//                  ±infinity, negative, subnormal, or > 1000.0 km/h. Valid inputs
+//                  are converted to the fixed-point internal representation; no float
+//                  reaches the decision engine.
 // - `gear`       — gear: 0=Park, 1=Drive, 2=Reverse, 3=Neutral.
 // - `actor`      — actor: 0=Driver, 1=Passenger.
 //
 // # Returns
 // A new `A2gVerifiedStateHandle`. Free with `a2g_verified_state_free`.
-// Returns NULL if `gear` or `actor` values are out of range (gear: 0–3, actor: 0–1).
+// Returns NULL if `speed_kph` is invalid (NaN/inf/negative/subnormal/out-of-range),
+// or if `gear` (0-3) or `actor` (0-1) values are out of range.
 struct A2gVerifiedStateHandle *a2g_verified_state_operator_trusted(double speed_kph,
                                                                    int32_t gear,
                                                                    int32_t actor);

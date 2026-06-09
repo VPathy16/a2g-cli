@@ -121,7 +121,7 @@ fn sensitive_escalate_mandate() -> String {
 
 fn parked_state() -> VerifiedVehicleState {
     VerifiedVehicleState::from_operator_trusted(VehicleState {
-        speed_kph: 0.0,
+        speed_mmps: 0,
         gear: Gear::Park,
         actor: Actor::Driver,
     })
@@ -129,7 +129,7 @@ fn parked_state() -> VerifiedVehicleState {
 
 fn moving_state() -> VerifiedVehicleState {
     VerifiedVehicleState::from_operator_trusted(VehicleState {
-        speed_kph: 80.0,
+        speed_mmps: 22_222, // 80.0 km/h
         gear: Gear::Drive,
         actor: Actor::Driver,
     })
@@ -523,7 +523,7 @@ fn test_attested_state_verified_at_gateway() {
     // Simulated ECU signs vehicle state using demo attester key.
     let attester_key = gw.demo_keys.attester_signing_key();
     let state = VehicleState {
-        speed_kph: 0.0,
+        speed_mmps: 0,
         gear: Gear::Park,
         actor: Actor::Driver,
     };
@@ -564,7 +564,7 @@ fn test_attested_state_stale_rejected_by_gateway() {
     // Sign state 10 seconds ago — too old for gateway freshness check.
     let attester_key = gw.demo_keys.attester_signing_key();
     let state = VehicleState {
-        speed_kph: 0.0,
+        speed_mmps: 0,
         gear: Gear::Park,
         actor: Actor::Driver,
     };
@@ -575,7 +575,7 @@ fn test_attested_state_stale_rejected_by_gateway() {
     let mandate = comfort_mandate();
     let params: serde_json::Value = serde_json::json!({});
     let op_state = VerifiedVehicleState::from_operator_trusted(VehicleState {
-        speed_kph: 0.0,
+        speed_mmps: 0,
         gear: Gear::Park,
         actor: Actor::Driver,
     });

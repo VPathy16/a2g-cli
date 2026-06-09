@@ -1198,7 +1198,7 @@ mod tests {
         let db = TestLedger;
         let parked =
             crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
-                speed_kph: 0.0,
+                speed_mmps: 0,
                 gear: crate::vehicle::Gear::Park,
                 actor: crate::vehicle::Actor::Driver,
             });
@@ -1222,7 +1222,7 @@ mod tests {
         let db = TestLedger;
         let moving =
             crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
-                speed_kph: 60.0,
+                speed_mmps: 16_667, // 60.0 km/h
                 gear: crate::vehicle::Gear::Drive,
                 actor: crate::vehicle::Actor::Driver,
             });
@@ -1412,7 +1412,7 @@ mod tests {
         let db = TestLedger;
         let parked =
             crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
-                speed_kph: 0.0,
+                speed_mmps: 0,
                 gear: crate::vehicle::Gear::Park,
                 actor: crate::vehicle::Actor::Driver,
             });
@@ -1451,7 +1451,7 @@ mod tests {
         let db = TestLedger;
         let parked =
             crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
-                speed_kph: 0.0,
+                speed_mmps: 0,
                 gear: crate::vehicle::Gear::Park,
                 actor: crate::vehicle::Actor::Driver,
             });
@@ -1512,7 +1512,7 @@ mod tests {
         let db = TestLedger;
         let parked =
             crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
-                speed_kph: 0.0,
+                speed_mmps: 0,
                 gear: crate::vehicle::Gear::Park,
                 actor: crate::vehicle::Actor::Driver,
             });
@@ -1569,7 +1569,7 @@ mod tests {
         let db = TestLedger;
         let parked =
             crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
-                speed_kph: 0.0,
+                speed_mmps: 0,
                 gear: crate::vehicle::Gear::Park,
                 actor: crate::vehicle::Actor::Driver,
             });
@@ -1633,7 +1633,7 @@ mod tests {
         let nonce = "challenge-abc-123";
         let now = Utc::now();
         let state = crate::vehicle::VehicleState {
-            speed_kph: 0.0,
+            speed_mmps: 0,
             gear: crate::vehicle::Gear::Park,
             actor: crate::vehicle::Actor::Driver,
         };
@@ -1748,7 +1748,7 @@ mod tests {
         let db = TestLedger;
         let parked =
             crate::vehicle::VerifiedVehicleState::new_for_test(crate::vehicle::VehicleState {
-                speed_kph: 0.0,
+                speed_mmps: 0,
                 gear: crate::vehicle::Gear::Park,
                 actor: crate::vehicle::Actor::Driver,
             });
@@ -1814,7 +1814,7 @@ mod tests {
         let nonce = "test-nonce-attest";
         let now = Utc::now();
         let state = crate::vehicle::VehicleState {
-            speed_kph: 0.0,
+            speed_mmps: 0,
             gear: crate::vehicle::Gear::Park,
             actor: crate::vehicle::Actor::Driver,
         };
@@ -1855,7 +1855,7 @@ mod tests {
         );
         let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
         let state = crate::vehicle::VehicleState {
-            speed_kph: 0.0,
+            speed_mmps: 0,
             gear: crate::vehicle::Gear::Park,
             actor: crate::vehicle::Actor::Driver,
         };

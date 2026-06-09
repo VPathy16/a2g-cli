@@ -67,9 +67,11 @@ static void print_verdict(const A2gVerdictHandle *h) {
 static void demo_allow(const char *mandate) {
     printf("\n=== Demo 1: ALLOW (read_file, parked, driver) ===\n");
 
-    /* Create an operator-trusted vehicle state: parked (gear=0), 0 km/h, driver (actor=0). */
+    /* Create an operator-trusted vehicle state: parked (gear=0), 0 km/h, driver (actor=0).
+     * speed_kph is a double at the C ABI, validated and converted to mm/s internally.
+     * NaN, infinity, negative, subnormal, or >1000.0 values return NULL (fail-safe DENY). */
     A2gVerifiedStateHandle *state =
-        a2g_verified_state_operator_trusted(0.0 /* speed_kph */,
+        a2g_verified_state_operator_trusted(0.0 /* speed_kph — converted to 0 mm/s */,
                                             0   /* gear: Park */,
                                             0   /* actor: Driver */);
     if (state == NULL) {
