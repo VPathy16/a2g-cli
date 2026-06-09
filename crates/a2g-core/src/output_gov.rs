@@ -75,7 +75,9 @@ pub fn govern_output(response: &str, rules: &OutputGovernance) -> OutputVerdict 
     if max_len > 0 && content_len_u64 > max_len {
         let original_len = content.len();
         // max_len < content.len() <= usize::MAX, so max_len fits in usize.
-        let end_max = usize::try_from(max_len).unwrap_or(original_len).min(original_len);
+        let end_max = usize::try_from(max_len)
+            .unwrap_or(original_len)
+            .min(original_len);
         let mut end = end_max;
         // Walk back to a valid UTF-8 char boundary; end > 0 ensures no underflow.
         while end > 0 && !content.is_char_boundary(end) {

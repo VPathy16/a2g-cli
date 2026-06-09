@@ -350,10 +350,11 @@ pub fn verify_chain(chain: &[Delegation]) -> Result<ChainValidation, Box<dyn std
                 }
                 // Verify authority level decreases (numeric value increases: Root(0) < Dept(1) < Team(2) < Op(3))
                 if d.level <= prev.level {
-                    return Err(
-                        format!("chain broken at delegation {}: level does not decrease", i)
-                            .into(),
-                    );
+                    return Err(format!(
+                        "chain broken at delegation {}: level does not decrease",
+                        i
+                    )
+                    .into());
                 }
             }
         }
@@ -361,7 +362,9 @@ pub fn verify_chain(chain: &[Delegation]) -> Result<ChainValidation, Box<dyn std
 
     // Compute effective scope (intersection of all scopes in chain)
     let effective_scope = compute_effective_scope(chain);
-    let leaf = chain.last().ok_or("empty delegation chain after validation")?;
+    let leaf = chain
+        .last()
+        .ok_or("empty delegation chain after validation")?;
 
     Ok(ChainValidation {
         valid: true,

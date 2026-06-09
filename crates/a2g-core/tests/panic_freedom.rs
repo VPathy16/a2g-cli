@@ -16,7 +16,7 @@
 use a2g_core::enforce::{decide, Decision};
 use a2g_core::ledger::EnforceLedger;
 use a2g_core::mandate;
-use a2g_core::vehicle::{Actor, Gear, VerifiedVehicleState, VehicleState};
+use a2g_core::vehicle::{Actor, Gear, VehicleState, VerifiedVehicleState};
 use chrono::Utc;
 use proptest::prelude::*;
 
@@ -160,12 +160,11 @@ proptest! {
         let params = serde_json::json!({ "extra": extra_garbage });
         for tool in &forbidden {
             let result = decide(&mandate, tool, &params, &NoopLedger, Utc::now(), None);
-            match result {
-                Ok(v) => prop_assert_eq!(
+            if let Ok(v) = result {
+                prop_assert_eq!(
                     v.decision, Decision::Deny,
                     "Forbidden tool '{}' must be DENY", tool
-                ),
-                Err(_) => {} // Err also resolves to DENY — acceptable
+                );
             }
         }
     }
@@ -201,7 +200,14 @@ fn empty_mandate_is_not_panic() {
 #[test]
 fn null_bytes_in_mandate_not_panic() {
     let params = serde_json::json!({});
-    let result = decide("\0\0\0", "read_file", &params, &NoopLedger, Utc::now(), None);
+    let result = decide(
+        "\0\0\0",
+        "read_file",
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        None,
+    );
     assert!(result.is_err(), "null-byte mandate must return Err");
 }
 
@@ -216,8 +222,18 @@ fn nan_speed_not_panic() {
     let mandate = valid_mandate(&["WINDOW_POS"]);
     let params = serde_json::json!({});
     // Must return a verdict (DENY due to NaN speed failing parked check) — not panic.
-    let result = decide(&mandate, "WINDOW_POS", &params, &NoopLedger, Utc::now(), Some(&vs));
-    assert!(result.is_ok(), "NaN speed must produce a verdict, not panic");
+    let result = decide(
+        &mandate,
+        "WINDOW_POS",
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        Some(&vs),
+    );
+    assert!(
+        result.is_ok(),
+        "NaN speed must produce a verdict, not panic"
+    );
     assert_eq!(result.unwrap().decision, Decision::Deny);
 }
 
@@ -231,7 +247,14 @@ fn inf_speed_not_panic() {
     let vs = VerifiedVehicleState::from_operator_trusted(state);
     let mandate = valid_mandate(&["WINDOW_POS"]);
     let params = serde_json::json!({});
-    let result = decide(&mandate, "WINDOW_POS", &params, &NoopLedger, Utc::now(), Some(&vs));
+    let result = decide(
+        &mandate,
+        "WINDOW_POS",
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        Some(&vs),
+    );
     assert!(result.is_ok());
     assert_eq!(result.unwrap().decision, Decision::Deny);
 }
@@ -251,7 +274,14 @@ fn internal_error_resolves_to_deny_at_ffi_boundary() {
     // Simulate what a2g-ffi does for any Err from decide(): produce a DENY verdict.
     // This proves the fail-safe contract is tested end-to-end.
     let params = serde_json::json!({});
-    let result = decide("not-valid-toml", "read_file", &params, &NoopLedger, Utc::now(), None);
+    let result = decide(
+        "not-valid-toml",
+        "read_file",
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        None,
+    );
     assert!(result.is_err(), "invalid mandate must Err");
     // The FFI shim converts this Err to A2G_DECISION_ERROR which is treated as DENY.
     // Tested here by asserting no panic occurred.

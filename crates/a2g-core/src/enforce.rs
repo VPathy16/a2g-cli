@@ -498,7 +498,9 @@ fn decide_core<L: EnforceLedger>(
             let request_hash = compute_request_hash(&mandate_hash, tool, &params_hash, &timestamp);
             let binding_id = uuid::Uuid::new_v4().to_string();
             // Adding 5 minutes cannot overflow for any realistic timestamp; None only if now > year 262143.
-            let ttl_expires_at = now.checked_add_signed(Duration::minutes(PENDING_APPROVAL_TTL_MINUTES)).unwrap_or(now);
+            let ttl_expires_at = now
+                .checked_add_signed(Duration::minutes(PENDING_APPROVAL_TTL_MINUTES))
+                .unwrap_or(now);
             let pending = PendingApprovalBinding {
                 binding_id,
                 request_hash,
@@ -544,7 +546,9 @@ fn decide_core<L: EnforceLedger>(
                         request_hash,
                         escalate_to: m.escalation.escalate_to.clone(),
                         // Adding 5 minutes cannot overflow for any realistic timestamp; None only if now > year 262143.
-                        ttl_expires_at: now.checked_add_signed(Duration::minutes(PENDING_APPROVAL_TTL_MINUTES)).unwrap_or(now),
+                        ttl_expires_at: now
+                            .checked_add_signed(Duration::minutes(PENDING_APPROVAL_TTL_MINUTES))
+                            .unwrap_or(now),
                     };
                     let mut v = make_verdict(
                         Decision::PendingApproval,
@@ -572,7 +576,9 @@ fn decide_core<L: EnforceLedger>(
                         request_hash,
                         escalate_to: m.escalation.escalate_to.clone(),
                         // Adding 5 minutes cannot overflow for any realistic timestamp; None only if now > year 262143.
-                        ttl_expires_at: now.checked_add_signed(Duration::minutes(PENDING_APPROVAL_TTL_MINUTES)).unwrap_or(now),
+                        ttl_expires_at: now
+                            .checked_add_signed(Duration::minutes(PENDING_APPROVAL_TTL_MINUTES))
+                            .unwrap_or(now),
                     };
                     let mut v = make_verdict(
                         Decision::PendingApproval,
@@ -655,11 +661,21 @@ fn validate_operating_hours(
     let mut range = hours_str.splitn(2, '-');
     let start = range
         .next()
-        .ok_or_else(|| format!("invalid operating_hours format '{}': expected HH:MM-HH:MM", hours_str))?
+        .ok_or_else(|| {
+            format!(
+                "invalid operating_hours format '{}': expected HH:MM-HH:MM",
+                hours_str
+            )
+        })?
         .trim();
     let end = range
         .next()
-        .ok_or_else(|| format!("invalid operating_hours format '{}': expected HH:MM-HH:MM", hours_str))?
+        .ok_or_else(|| {
+            format!(
+                "invalid operating_hours format '{}': expected HH:MM-HH:MM",
+                hours_str
+            )
+        })?
         .trim();
 
     let parse_time = |time_str: &str| -> Result<(u32, u32), Box<dyn std::error::Error>> {
@@ -851,15 +867,15 @@ fn extract_host(url: &str) -> String {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::panic
+)]
 mod tests {
-    #[allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::arithmetic_side_effects,
-        clippy::integer_division,
-        clippy::panic
-    )]
     use super::*;
     use chrono::TimeZone;
 

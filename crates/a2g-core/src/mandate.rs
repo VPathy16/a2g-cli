@@ -339,7 +339,10 @@ pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, Box<dyn std::err
 
     // 3. Reconstruct canonical signing payload for verification (SPEC §4.5)
     let mut verify_mandate = mandate;
-    let sig_clone = verify_mandate.signature.take().ok_or("mandate signature unexpectedly absent")?;
+    let sig_clone = verify_mandate
+        .signature
+        .take()
+        .ok_or("mandate signature unexpectedly absent")?;
     let payload = mandate_signing_payload(
         &verify_mandate.mandate.agent_did,
         &verify_mandate.mandate.issuer,
@@ -377,11 +380,7 @@ pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, Box<dyn std::err
 
     if ttl_remaining <= 0 {
         let ago = ttl_remaining.saturating_neg();
-        return Err(format!(
-            "mandate expired at {} ({} seconds ago)",
-            expires_at, ago
-        )
-        .into());
+        return Err(format!("mandate expired at {} ({} seconds ago)", expires_at, ago).into());
     }
 
     // 6. Return info
@@ -406,7 +405,10 @@ pub fn verify_signature(mandate_str: &str) -> Result<(), Box<dyn std::error::Err
         return Err(format!("unsupported algorithm: {}", sig.algorithm).into());
     }
     let mut m = mandate;
-    let sig_clone = m.signature.take().ok_or("mandate signature unexpectedly absent")?;
+    let sig_clone = m
+        .signature
+        .take()
+        .ok_or("mandate signature unexpectedly absent")?;
     let payload = mandate_signing_payload(
         &m.mandate.agent_did,
         &m.mandate.issuer,
