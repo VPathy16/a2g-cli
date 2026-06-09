@@ -131,7 +131,10 @@ pub fn create_root_delegation(
     );
 
     let now = Utc::now();
-    let expires = now + Duration::hours(ttl_hours as i64);
+    let ttl_hours_i64 = i64::try_from(ttl_hours).unwrap_or(i64::MAX);
+    let expires = now
+        .checked_add_signed(Duration::hours(ttl_hours_i64))
+        .unwrap_or(now);
     let delegation_id = uuid::Uuid::new_v4().to_string();
 
     // Root delegation: grantor == grantee (self-delegation)
@@ -204,8 +207,9 @@ pub fn delegate(
         .parse::<DateTime<Utc>>()
         .map_err(|_| "invalid parent expires_at")?;
     let now = Utc::now();
-    let parent_remaining_hours = (parent_expires - now).num_hours();
-    if ttl_hours as i64 > parent_remaining_hours {
+    let parent_remaining_hours = parent_expires.signed_duration_since(now).num_hours();
+    let ttl_hours_i64 = i64::try_from(ttl_hours).unwrap_or(i64::MAX);
+    if ttl_hours_i64 > parent_remaining_hours {
         return Err(format!(
             "requested TTL ({} hours) exceeds parent's remaining TTL ({} hours)",
             ttl_hours, parent_remaining_hours
@@ -232,7 +236,9 @@ pub fn delegate(
         .into());
     }
 
-    let expires = now + Duration::hours(ttl_hours as i64);
+    let expires = now
+        .checked_add_signed(Duration::hours(ttl_hours_i64))
+        .unwrap_or(now);
     let delegation_id = uuid::Uuid::new_v4().to_string();
 
     let delegation_data = format!(
@@ -310,7 +316,7 @@ pub fn verify_chain(chain: &[Delegation]) -> Result<ChainValidation, Box<dyn std
     }
 
     // First entry must be root (self-delegation)
-    let root = &chain[0];
+    let root = chain.first().ok_or("empty delegation chain")?;
     if root.grantor_did != root.grantee_did {
         return Err("chain root is not a self-delegation".into());
     }
@@ -327,31 +333,38 @@ pub fn verify_chain(chain: &[Delegation]) -> Result<ChainValidation, Box<dyn std
 
         // Verify chain linking (except root)
         if i > 0 {
-            if d.parent_delegation_hash != chain[i - 1].delegation_hash {
-                return Err(
-                    format!("chain broken at delegation {}: parent_hash mismatch", i).into(),
-                );
-            }
-            // Verify grantor matches previous grantee
-            if d.grantor_did != chain[i - 1].grantee_did {
-                return Err(format!(
-                    "chain broken at delegation {}: grantor is not previous grantee",
-                    i
-                )
-                .into());
-            }
-            // Verify authority level decreases (numeric value increases: Root(0) < Dept(1) < Team(2) < Op(3))
-            if d.level <= chain[i - 1].level {
-                return Err(
-                    format!("chain broken at delegation {}: level does not decrease", i).into(),
-                );
+            // Get previous element safely (i > 0 guarantees i.saturating_sub(1) == i - 1)
+            if let Some(prev) = chain.get(i.saturating_sub(1)) {
+                if d.parent_delegation_hash != prev.delegation_hash {
+                    return Err(
+                        format!("chain broken at delegation {}: parent_hash mismatch", i).into(),
+                    );
+                }
+                // Verify grantor matches previous grantee
+                if d.grantor_did != prev.grantee_did {
+                    return Err(format!(
+                        "chain broken at delegation {}: grantor is not previous grantee",
+                        i
+                    )
+                    .into());
+                }
+                // Verify authority level decreases (numeric value increases: Root(0) < Dept(1) < Team(2) < Op(3))
+                if d.level <= prev.level {
+                    return Err(format!(
+                        "chain broken at delegation {}: level does not decrease",
+                        i
+                    )
+                    .into());
+                }
             }
         }
     }
 
     // Compute effective scope (intersection of all scopes in chain)
     let effective_scope = compute_effective_scope(chain);
-    let leaf = chain.last().unwrap();
+    let leaf = chain
+        .last()
+        .ok_or("empty delegation chain after validation")?;
 
     Ok(ChainValidation {
         valid: true,
@@ -407,10 +420,10 @@ pub fn check_jurisdiction(jurisdiction: &Jurisdiction) -> Result<(), Box<dyn std
         let now = Utc::now();
         let hour_min = now.format("%H:%M").to_string();
 
-        let parts: Vec<&str> = jurisdiction.operating_hours.split('-').collect();
-        if parts.len() == 2 {
-            let start = parts[0];
-            let end = parts[1];
+        let mut parts = jurisdiction.operating_hours.splitn(2, '-');
+        if let (Some(start), Some(end)) = (parts.next(), parts.next()) {
+            let start = start.trim();
+            let end = end.trim();
             if hour_min.as_str() < start || hour_min.as_str() > end {
                 return Err(format!(
                     "jurisdiction violation: current time {} is outside operating hours {}",
@@ -430,9 +443,12 @@ fn compute_effective_scope(chain: &[Delegation]) -> AuthorityScope {
         return AuthorityScope::default();
     }
 
-    let mut scope = chain[0].scope.clone();
+    let mut scope = match chain.first() {
+        Some(first) => first.scope.clone(),
+        None => return AuthorityScope::default(),
+    };
 
-    for d in &chain[1..] {
+    for d in chain.iter().skip(1) {
         // Tools: intersection
         if !d.scope.allowed_tools.is_empty() {
             if scope.allowed_tools.is_empty() {
@@ -503,6 +519,14 @@ fn validate_scope_subset(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use crate::identity;

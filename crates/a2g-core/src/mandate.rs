@@ -279,7 +279,10 @@ pub fn sign_mandate(
 
     // Set timestamps
     let now = Utc::now();
-    let expires = now + Duration::hours(ttl_hours as i64);
+    let ttl_hours_i64 = i64::try_from(ttl_hours).unwrap_or(i64::MAX);
+    let expires = now
+        .checked_add_signed(Duration::hours(ttl_hours_i64))
+        .unwrap_or(now);
     mandate.mandate.issued_at = now.to_rfc3339();
     mandate.mandate.expires_at = expires.to_rfc3339();
 
@@ -336,7 +339,10 @@ pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, Box<dyn std::err
 
     // 3. Reconstruct canonical signing payload for verification (SPEC §4.5)
     let mut verify_mandate = mandate;
-    let sig_clone = verify_mandate.signature.take().unwrap();
+    let sig_clone = verify_mandate
+        .signature
+        .take()
+        .ok_or("mandate signature unexpectedly absent")?;
     let payload = mandate_signing_payload(
         &verify_mandate.mandate.agent_did,
         &verify_mandate.mandate.issuer,
@@ -370,14 +376,11 @@ pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, Box<dyn std::err
         .map_err(|_| "invalid expires_at timestamp")?;
 
     let now = Utc::now();
-    let ttl_remaining = (expires_at - now).num_seconds();
+    let ttl_remaining = expires_at.signed_duration_since(now).num_seconds();
 
     if ttl_remaining <= 0 {
-        return Err(format!(
-            "mandate expired at {} ({} seconds ago)",
-            expires_at, -ttl_remaining
-        )
-        .into());
+        let ago = ttl_remaining.saturating_neg();
+        return Err(format!("mandate expired at {} ({} seconds ago)", expires_at, ago).into());
     }
 
     // 6. Return info
@@ -402,7 +405,10 @@ pub fn verify_signature(mandate_str: &str) -> Result<(), Box<dyn std::error::Err
         return Err(format!("unsupported algorithm: {}", sig.algorithm).into());
     }
     let mut m = mandate;
-    let sig_clone = m.signature.take().unwrap();
+    let sig_clone = m
+        .signature
+        .take()
+        .ok_or("mandate signature unexpectedly absent")?;
     let payload = mandate_signing_payload(
         &m.mandate.agent_did,
         &m.mandate.issuer,
@@ -434,6 +440,14 @@ pub fn parse_mandate(mandate_str: &str) -> Result<Mandate, Box<dyn std::error::E
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::integer_division,
+        clippy::panic
+    )]
     use super::*;
     use crate::identity;
 

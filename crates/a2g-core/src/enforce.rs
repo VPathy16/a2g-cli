@@ -476,9 +476,9 @@ fn decide_core<L: EnforceLedger>(
             validate_operating_hours(&m.jurisdiction.operating_hours)?;
         let current_hour = now.hour();
         let current_min = now.minute();
-        let current_total = current_hour * 60 + current_min;
-        let start_total = start_hour * 60 + start_min;
-        let end_total = end_hour * 60 + end_min;
+        let current_total = current_hour.saturating_mul(60).saturating_add(current_min);
+        let start_total = start_hour.saturating_mul(60).saturating_add(start_min);
+        let end_total = end_hour.saturating_mul(60).saturating_add(end_min);
 
         if current_total < start_total || current_total > end_total {
             return Ok(make_verdict(
@@ -497,7 +497,10 @@ fn decide_core<L: EnforceLedger>(
             let timestamp = now.to_rfc3339();
             let request_hash = compute_request_hash(&mandate_hash, tool, &params_hash, &timestamp);
             let binding_id = uuid::Uuid::new_v4().to_string();
-            let ttl_expires_at = now + Duration::minutes(PENDING_APPROVAL_TTL_MINUTES);
+            // Adding 5 minutes cannot overflow for any realistic timestamp; None only if now > year 262143.
+            let ttl_expires_at = now
+                .checked_add_signed(Duration::minutes(PENDING_APPROVAL_TTL_MINUTES))
+                .unwrap_or(now);
             let pending = PendingApprovalBinding {
                 binding_id,
                 request_hash,
@@ -542,7 +545,10 @@ fn decide_core<L: EnforceLedger>(
                         binding_id,
                         request_hash,
                         escalate_to: m.escalation.escalate_to.clone(),
-                        ttl_expires_at: now + Duration::minutes(PENDING_APPROVAL_TTL_MINUTES),
+                        // Adding 5 minutes cannot overflow for any realistic timestamp; None only if now > year 262143.
+                        ttl_expires_at: now
+                            .checked_add_signed(Duration::minutes(PENDING_APPROVAL_TTL_MINUTES))
+                            .unwrap_or(now),
                     };
                     let mut v = make_verdict(
                         Decision::PendingApproval,
@@ -569,7 +575,10 @@ fn decide_core<L: EnforceLedger>(
                         binding_id,
                         request_hash,
                         escalate_to: m.escalation.escalate_to.clone(),
-                        ttl_expires_at: now + Duration::minutes(PENDING_APPROVAL_TTL_MINUTES),
+                        // Adding 5 minutes cannot overflow for any realistic timestamp; None only if now > year 262143.
+                        ttl_expires_at: now
+                            .checked_add_signed(Duration::minutes(PENDING_APPROVAL_TTL_MINUTES))
+                            .unwrap_or(now),
                     };
                     let mut v = make_verdict(
                         Decision::PendingApproval,
@@ -622,7 +631,9 @@ pub fn enforce<L: EnforceLedger>(
     let resolved_params = if let Some(raw_path) = params.get("path").and_then(|p| p.as_str()) {
         let resolved = resolve_path_for_enforce(raw_path)?;
         let mut p = params.clone();
-        p["path"] = serde_json::Value::String(resolved);
+        p.as_object_mut()
+            .ok_or("params is not a JSON object")?
+            .insert("path".to_string(), serde_json::Value::String(resolved));
         p
     } else {
         params.clone()
@@ -647,26 +658,38 @@ pub fn enforce<L: EnforceLedger>(
 fn validate_operating_hours(
     hours_str: &str,
 ) -> Result<(u32, u32, u32, u32), Box<dyn std::error::Error>> {
-    let parts: Vec<&str> = hours_str.split('-').collect();
-    if parts.len() != 2 {
-        return Err(format!(
-            "invalid operating_hours format '{}': expected HH:MM-HH:MM",
-            hours_str
-        )
-        .into());
-    }
-    let start = parts[0].trim();
-    let end = parts[1].trim();
+    let mut range = hours_str.splitn(2, '-');
+    let start = range
+        .next()
+        .ok_or_else(|| {
+            format!(
+                "invalid operating_hours format '{}': expected HH:MM-HH:MM",
+                hours_str
+            )
+        })?
+        .trim();
+    let end = range
+        .next()
+        .ok_or_else(|| {
+            format!(
+                "invalid operating_hours format '{}': expected HH:MM-HH:MM",
+                hours_str
+            )
+        })?
+        .trim();
 
     let parse_time = |time_str: &str| -> Result<(u32, u32), Box<dyn std::error::Error>> {
-        let time_parts: Vec<&str> = time_str.split(':').collect();
-        if time_parts.len() != 2 {
-            return Err(format!("invalid time '{}': expected HH:MM", time_str).into());
-        }
-        let hour: u32 = time_parts[0]
+        let mut tp = time_str.splitn(2, ':');
+        let hour_str = tp
+            .next()
+            .ok_or_else(|| format!("invalid time '{}': expected HH:MM", time_str))?;
+        let min_str = tp
+            .next()
+            .ok_or_else(|| format!("invalid time '{}': expected HH:MM", time_str))?;
+        let hour: u32 = hour_str
             .parse()
             .map_err(|_| format!("invalid hour in '{}'", time_str))?;
-        let minute: u32 = time_parts[1]
+        let minute: u32 = min_str
             .parse()
             .map_err(|_| format!("invalid minute in '{}'", time_str))?;
         if hour > 23 {
@@ -681,8 +704,9 @@ fn validate_operating_hours(
     let (sh, sm) = parse_time(start)?;
     let (eh, em) = parse_time(end)?;
 
-    let start_total = sh * 60 + sm;
-    let end_total = eh * 60 + em;
+    // Values are bounded: hour 0-23, minute 0-59; saturating arithmetic is exact here.
+    let start_total = sh.saturating_mul(60).saturating_add(sm);
+    let end_total = eh.saturating_mul(60).saturating_add(em);
     if start_total >= end_total {
         return Err(format!(
             "operating_hours start '{}' must be before end '{}'",
@@ -768,12 +792,11 @@ fn resolve_path_for_enforce(raw: &str) -> Result<String, Box<dyn std::error::Err
 
 fn glob_matches(pattern: &str, path: &str) -> bool {
     if pattern.contains("**") {
-        let parts: Vec<&str> = pattern.splitn(2, "**").collect();
-        if parts.len() == 2 {
-            let prefix = parts[0].trim_end_matches('/');
-            let suffix = parts[1].trim_start_matches('/');
-            let path_matches_prefix = prefix.is_empty() || path.starts_with(prefix);
-            if !path_matches_prefix {
+        let mut double_star = pattern.splitn(2, "**");
+        if let (Some(prefix_raw), Some(suffix_raw)) = (double_star.next(), double_star.next()) {
+            let prefix = prefix_raw.trim_end_matches('/');
+            let suffix = suffix_raw.trim_start_matches('/');
+            if !prefix.is_empty() && !path.starts_with(prefix) {
                 return false;
             }
             if suffix.is_empty() {
@@ -795,29 +818,38 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
 
 fn simple_wildcard_match(pattern: &str, text: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() == 2 {
-        let prefix = parts[0];
-        let suffix = parts[1];
-        return text.starts_with(prefix)
-            && text.ends_with(suffix)
-            && text.len() >= prefix.len() + suffix.len();
-    }
-    if parts.is_empty() {
-        return true;
-    }
-    if !text.starts_with(parts[0]) {
-        return false;
-    }
-    let mut remaining = &text[parts[0].len()..];
-    for part in &parts[1..parts.len() - 1] {
-        if let Some(pos) = remaining.find(part) {
-            remaining = &remaining[pos + part.len()..];
-        } else {
-            return false;
+    match parts.as_slice() {
+        [] => true,
+        [only] => *only == text,
+        [prefix, suffix] => {
+            text.starts_with(*prefix)
+                && text.ends_with(*suffix)
+                && text.len() >= prefix.len().saturating_add(suffix.len())
+        }
+        [first, rest @ ..] => {
+            if !text.starts_with(*first) {
+                return false;
+            }
+            let Some(after_first) = text.get(first.len()..) else {
+                return false;
+            };
+            let mut remaining = after_first;
+            let Some((last, middle)) = rest.split_last() else {
+                return false;
+            };
+            for part in middle {
+                let Some(pos) = remaining.find(*part) else {
+                    return false;
+                };
+                let new_start = pos.saturating_add(part.len());
+                let Some(new_remaining) = remaining.get(new_start..) else {
+                    return false;
+                };
+                remaining = new_remaining;
+            }
+            remaining.ends_with(*last)
         }
     }
-    let last = parts[parts.len() - 1];
-    remaining.ends_with(last)
 }
 
 fn extract_host(url: &str) -> String {
@@ -835,6 +867,14 @@ fn extract_host(url: &str) -> String {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::integer_division,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
