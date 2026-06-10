@@ -1,13 +1,21 @@
-//! Mandate — Canonical policy documents with ed25519 signing and TTL
+//! Mandate — Canonical policy documents with CBOR encoding and ed25519 signing.
 //!
-//! A Mandate is a TOML document that declares an agent's permissions.
-//! It is signed by a sovereign authority and has a time-to-live (TTL).
+//! **Authoring format:** TOML (human-readable, CLI/std side only).
+//! **Distribution/verification format:** canonical CBOR (RFC 8949, ADR-0013).
+//!
+//! `a2g-core` only ever sees CBOR bytes. The `toml` crate does not appear here.
+//! TOML→CBOR compile+sign lives in the CLI layer (`a2g-cli/src/mandate_compile.rs`).
+//!
+//! Signing (Option b, ADR-0013): the ed25519 signature is over
+//! `encode_canonical(&MandateTbs)`. The `capabilities_hash` field inside `MandateTbs`
+//! preserves the §4.5 canonicalization rule (SHA-256 of sorted tools joined with `\n`).
 
-use chrono::{DateTime, Duration, Utc};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::cbor::{decode_canonical, CborMandate, MandateTbs};
 use crate::error::A2gError;
 
 /// Information extracted from a verified mandate
@@ -20,7 +28,7 @@ pub struct MandateInfo {
     pub tools: Vec<String>,
 }
 
-/// Parsed mandate structure (matches the TOML schema)
+/// Runtime mandate structure (populated from CBOR, used by enforce.rs).
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Mandate {
     pub mandate: MandateHeader,
@@ -89,18 +97,10 @@ pub struct Limits {
     pub max_session_duration_sec: u64,
 }
 
-fn default_rate() -> u64 {
-    60
-}
-fn default_file_size() -> u64 {
-    10_485_760
-}
-fn default_tokens() -> u64 {
-    4096
-}
-fn default_session() -> u64 {
-    3600
-}
+fn default_rate() -> u64 { 60 }
+fn default_file_size() -> u64 { 10_485_760 }
+fn default_tokens() -> u64 { 4096 }
+fn default_session() -> u64 { 3600 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct OutputGovernance {
@@ -112,43 +112,30 @@ pub struct OutputGovernance {
     pub max_output_length: u64,
 }
 
-fn default_output_len() -> u64 {
-    50_000
-}
+fn default_output_len() -> u64 { 50_000 }
 
-/// Jurisdictional binding — where and when this mandate is valid
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct MandateJurisdiction {
-    /// Geographic region (e.g., "US", "CA", "EU")
     #[serde(default)]
     pub region: String,
-    /// Regulatory framework (e.g., "GDPR", "SOC2", "PIPEDA")
     #[serde(default)]
     pub regulatory_framework: String,
-    /// Environment constraint (e.g., "production", "staging", "development")
     #[serde(default)]
     pub environment: String,
-    /// Classification level (e.g., "public", "internal", "confidential")
     #[serde(default)]
     pub classification: String,
-    /// Operating hours in UTC (empty = 24/7, format: "HH:MM-HH:MM")
     #[serde(default)]
     pub operating_hours: String,
 }
 
-/// Escalation rules — when to ESCALATE instead of ALLOW
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct EscalationRules {
-    /// Tools that trigger ESCALATE instead of ALLOW
     #[serde(default)]
     pub escalate_tools: Vec<String>,
-    /// Path patterns that trigger ESCALATE
     #[serde(default)]
     pub escalate_paths: Vec<String>,
-    /// Network patterns that trigger ESCALATE
     #[serde(default)]
     pub escalate_hosts: Vec<String>,
-    /// DID of the authority to escalate to
     #[serde(default)]
     pub escalate_to: String,
 }
@@ -161,13 +148,13 @@ pub struct MandateSignature {
     pub signed_at: String,
 }
 
-/// Sanitize an agent name: strip control characters, cap length
+/// Sanitize an agent name: strip control characters, cap length.
 pub fn sanitize_name(name: &str) -> String {
-    let cleaned: String = name.chars().filter(|c| !c.is_control()).take(256).collect();
-    cleaned
+    name.chars().filter(|c| !c.is_control()).take(256).collect()
 }
 
-/// Generate a mandate template for a new agent
+/// Generate a TOML mandate template for a new agent.
+/// The template is an authoring artifact — it must be compiled to CBOR before use.
 pub fn generate_template(name: &str, did: &str) -> String {
     let name = sanitize_name(name);
     format!(
@@ -229,16 +216,13 @@ escalate_to = ""
     )
 }
 
-/// Compute the `capabilities_hash` component of the canonical signing payload.
+/// Compute the `capabilities_hash` component (SPEC §4.5).
 ///
-/// **Algorithm (SPEC §4.5):**
-/// 1. Sort `tools` lexicographically (ascending byte order of UTF-8 strings).
-/// 2. Join with U+000A NEWLINE (`\n`). Empty list → empty string.
-/// 3. SHA-256 of the UTF-8 bytes of the joined string.
-/// 4. Hex-encode the digest (lowercase).
-///
-/// This exact procedure is normative — changing the sort order, separator, or
-/// hash algorithm produces a different value and breaks all existing signatures.
+/// **Algorithm (normative — preserved in ADR-0013):**
+/// 1. Sort `tools` lexicographically (ascending UTF-8 byte order).
+/// 2. Join with U+000A LINE FEED. Empty list → empty string.
+/// 3. SHA-256 of the UTF-8 bytes.
+/// 4. Hex-encode lowercase.
 pub fn capabilities_hash(tools: &[String]) -> String {
     let mut sorted = tools.to_vec();
     sorted.sort();
@@ -246,225 +230,159 @@ pub fn capabilities_hash(tools: &[String]) -> String {
     hex::encode(Sha256::digest(joined.as_bytes()))
 }
 
-/// Construct the canonical mandate signing payload (SPEC §4.5).
-///
-/// ```text
-/// MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>
-/// ```
-///
-/// The `MANDATE:` domain-separation prefix ensures this payload cannot be valid
-/// in any other A2G signing context. The signer and verifier both call this
-/// function so the payload is never assembled independently in two places.
-pub fn mandate_signing_payload(
-    agent_did: &str,
-    issuer_did: &str,
-    expires_at: &str,
-    tools: &[String],
-) -> String {
-    format!(
-        "MANDATE:{}:{}:{}:{}",
-        agent_did,
-        issuer_did,
-        expires_at,
-        capabilities_hash(tools)
-    )
+// ── Internal CBOR decode helpers ──────────────────────────────────────────────
+
+/// Convert a decoded `MandateTbs` to the runtime `Mandate` struct.
+fn tbs_to_mandate(tbs: &MandateTbs) -> Mandate {
+    Mandate {
+        mandate: MandateHeader {
+            version: "0.1.0".to_string(),
+            agent_did: tbs.agent_did.clone(),
+            agent_name: tbs.agent_name.clone(),
+            issued_at: tbs.issued_at.clone(),
+            expires_at: tbs.expires_at.clone(),
+            issuer: tbs.issuer_did.clone(),
+            proposal_hash: tbs.proposal_hash.clone(),
+            workspace_root: tbs.workspace_root.clone(),
+        },
+        capabilities: Capabilities { tools: tbs.tools.clone() },
+        boundaries: Boundaries {
+            fs_read: tbs.fs_read.clone(),
+            fs_write: tbs.fs_write.clone(),
+            fs_deny: tbs.fs_deny.clone(),
+            net_allow: tbs.net_allow.clone(),
+            net_deny: tbs.net_deny.clone(),
+            cmd_allow: tbs.cmd_allow.clone(),
+            cmd_deny: tbs.cmd_deny.clone(),
+        },
+        limits: Limits {
+            max_calls_per_minute: tbs.max_calls_per_minute,
+            max_file_size_bytes: tbs.max_file_size_bytes,
+            max_output_tokens: tbs.max_output_tokens,
+            max_session_duration_sec: tbs.max_session_duration_sec,
+        },
+        output_governance: OutputGovernance {
+            deny_patterns: tbs.deny_patterns.clone(),
+            redact_patterns: tbs.redact_patterns.clone(),
+            max_output_length: tbs.max_output_length,
+        },
+        jurisdiction: MandateJurisdiction {
+            region: tbs.region.clone(),
+            regulatory_framework: tbs.regulatory_framework.clone(),
+            environment: tbs.environment.clone(),
+            classification: tbs.classification.clone(),
+            operating_hours: tbs.operating_hours.clone(),
+        },
+        escalation: EscalationRules {
+            escalate_tools: tbs.escalate_tools.clone(),
+            escalate_paths: tbs.escalate_paths.clone(),
+            escalate_hosts: tbs.escalate_hosts.clone(),
+            escalate_to: tbs.escalate_to.clone(),
+        },
+        signature: None,
+    }
 }
 
-/// Sign a mandate with a sovereign ed25519 key
-pub fn sign_mandate(
-    mandate_str: &str,
-    sovereign_secret_hex: &str,
-    ttl_hours: u64,
-) -> Result<String, A2gError> {
-    // Parse to validate structure
-    let mut mandate: Mandate =
-        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
-
-    // Set timestamps
-    let now = Utc::now();
-    let ttl_hours_i64 = i64::try_from(ttl_hours).unwrap_or(i64::MAX);
-    let expires = now
-        .checked_add_signed(Duration::hours(ttl_hours_i64))
-        .unwrap_or(now);
-    mandate.mandate.issued_at = now.to_rfc3339();
-    mandate.mandate.expires_at = expires.to_rfc3339();
-
-    // Derive issuer DID from sovereign key
-    let secret_bytes =
-        hex::decode(sovereign_secret_hex).map_err(|e| A2gError::HexDecode(e.to_string()))?;
-    let secret_arr: [u8; 32] = secret_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| A2gError::InvalidKey)?;
-    let signing_key = SigningKey::from_bytes(&secret_arr);
-    let verifying_key = signing_key.verifying_key();
-    let issuer_pubkey_hex = hex::encode(verifying_key.to_bytes());
-    let issuer_did = format!(
-        "did:a2g:{}",
-        bs58::encode(verifying_key.to_bytes()).into_string()
-    );
-    mandate.mandate.issuer = issuer_did;
-
-    // Build canonical signing payload (SPEC §4.5):
-    //   MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>
-    let payload = mandate_signing_payload(
-        &mandate.mandate.agent_did,
-        &mandate.mandate.issuer,
-        &mandate.mandate.expires_at,
-        &mandate.capabilities.tools,
-    );
-    let body_hash = Sha256::digest(payload.as_bytes());
-    let signature = signing_key.sign(&body_hash);
-
-    // Remove old signature before serializing the TOML body
-    mandate.signature = None;
-    let body_str = toml::to_string_pretty(&mandate).map_err(|e| A2gError::Json(e.to_string()))?;
-
-    // Build final TOML with signature section
-    let signed_toml = format!(
-        "{}\n[signature]\nalgorithm = \"ed25519\"\nissuer_pubkey = \"{}\"\nsignature = \"{}\"\nsigned_at = \"{}\"\n",
-        body_str.trim(),
-        issuer_pubkey_hex,
-        hex::encode(signature.to_bytes()),
-        now.to_rfc3339()
-    );
-
-    Ok(signed_toml)
-}
-
-/// Verify a signed mandate — checks signature, TTL, and structural validity
-pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, A2gError> {
-    let mandate: Mandate =
-        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
-
-    // 1. Check signature exists
-    let sig = mandate
-        .signature
-        .as_ref()
-        .ok_or_else(|| A2gError::MandateInvalid("mandate is unsigned".to_string()))?;
-
-    // 2. Verify signature algorithm
-    if sig.algorithm != "ed25519" {
+/// Decode a CBOR mandate envelope without signature verification.
+///
+/// Used by `decide_core()`: step 0 (revocation check) needs `agent_did` and
+/// `mandate_hash` before the step 1 signature verification.
+pub(crate) fn parse_cbor_mandate_raw(cbor: &[u8]) -> Result<(Mandate, CborMandate), A2gError> {
+    let envelope: CborMandate = decode_canonical(cbor)?;
+    if envelope.tag.as_str() != "MANDATE-V1" {
         return Err(A2gError::MandateInvalid(format!(
-            "unsupported algorithm: {}",
-            sig.algorithm
+            "expected MANDATE-V1 tag, got '{}'",
+            envelope.tag
         )));
     }
+    let tbs: MandateTbs = decode_canonical(&envelope.tbs)?;
+    if tbs.tag.as_str() != "MANDATE" {
+        return Err(A2gError::MandateInvalid(format!(
+            "expected MANDATE TBS tag, got '{}'",
+            tbs.tag
+        )));
+    }
+    let mandate = tbs_to_mandate(&tbs);
+    Ok((mandate, envelope))
+}
 
-    // 3. Reconstruct canonical signing payload for verification (SPEC §4.5)
-    let mut verify_mandate = mandate;
-    let sig_clone = verify_mandate
-        .signature
-        .take()
-        .ok_or_else(|| A2gError::Internal("mandate signature unexpectedly absent".to_string()))?;
-    let payload = mandate_signing_payload(
-        &verify_mandate.mandate.agent_did,
-        &verify_mandate.mandate.issuer,
-        &verify_mandate.mandate.expires_at,
-        &verify_mandate.capabilities.tools,
-    );
-    let body_hash = Sha256::digest(payload.as_bytes());
+/// Verify the ed25519 signature on a decoded CBOR mandate envelope.
+///
+/// Checks:
+/// 1. `issuer_pubkey` is a valid 32-byte ed25519 key.
+/// 2. `signature` is a valid 64-byte ed25519 signature over `tbs` bytes.
+/// 3. `capabilities_hash` in TBS matches the `tools` list.
+/// 4. `issuer_did` in TBS matches `did:a2g:<bs58(issuer_pubkey)>`.
+pub(crate) fn verify_cbor_signature(envelope: &CborMandate) -> Result<(), A2gError> {
+    let tbs: MandateTbs = decode_canonical(&envelope.tbs)?;
 
-    // 4. Verify ed25519 signature
-    let pubkey_bytes =
-        hex::decode(&sig_clone.issuer_pubkey).map_err(|e| A2gError::HexDecode(e.to_string()))?;
-    let pubkey_arr: [u8; 32] = pubkey_bytes
-        .as_slice()
+    let pubkey_arr: [u8; 32] = envelope
+        .issuer_pubkey
+        .as_ref()
         .try_into()
         .map_err(|_| A2gError::InvalidKey)?;
     let verifying_key = VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| A2gError::InvalidKey)?;
 
-    let sig_bytes =
-        hex::decode(&sig_clone.signature).map_err(|e| A2gError::HexDecode(e.to_string()))?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .as_slice()
+    let sig_arr: [u8; 64] = envelope
+        .signature
+        .as_ref()
         .try_into()
         .map_err(|_| A2gError::SignatureInvalid)?;
-    let signature = Signature::from_bytes(&sig_arr);
-
+    let sig = Signature::from_bytes(&sig_arr);
     verifying_key
-        .verify(&body_hash, &signature)
+        .verify(&envelope.tbs, &sig)
         .map_err(|_| A2gError::SignatureInvalid)?;
 
-    // 5. Check TTL
-    let expires_at = verify_mandate
+    // Verify issuer_did matches issuer_pubkey
+    let expected_issuer_did = format!(
+        "did:a2g:{}",
+        bs58::encode(&pubkey_arr).into_string()
+    );
+    if tbs.issuer_did != expected_issuer_did {
+        return Err(A2gError::MandateInvalid(
+            "issuer_did does not match issuer_pubkey".to_string(),
+        ));
+    }
+
+    // Verify capabilities_hash matches tools (§4.5 canonicalization)
+    let expected_hash = capabilities_hash(&tbs.tools);
+    let expected_bytes =
+        hex::decode(&expected_hash).map_err(|e| A2gError::HexDecode(e.to_string()))?;
+    if tbs.capabilities_hash.as_ref() != expected_bytes.as_slice() {
+        return Err(A2gError::MandateInvalid(
+            "capabilities_hash does not match tools list".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Decode and verify a CBOR mandate, checking TTL.
+///
+/// This is the public verification API for the CLI `a2g verify` command.
+pub fn verify_cbor_mandate(cbor: &[u8], now: DateTime<Utc>) -> Result<MandateInfo, A2gError> {
+    let (mandate, envelope) = parse_cbor_mandate_raw(cbor)?;
+    verify_cbor_signature(&envelope)?;
+
+    let expires_at = mandate
         .mandate
         .expires_at
         .parse::<DateTime<Utc>>()
         .map_err(|_| A2gError::MandateInvalid("invalid expires_at timestamp".to_string()))?;
 
-    let now = Utc::now();
     let ttl_remaining = expires_at.signed_duration_since(now).num_seconds();
-
     if ttl_remaining <= 0 {
         return Err(A2gError::MandateExpired);
     }
 
-    // 6. Return info
     Ok(MandateInfo {
-        agent_did: verify_mandate.mandate.agent_did,
-        agent_name: verify_mandate.mandate.agent_name,
-        issuer: verify_mandate.mandate.issuer,
+        agent_did: mandate.mandate.agent_did,
+        agent_name: mandate.mandate.agent_name,
+        issuer: mandate.mandate.issuer,
         expires_at: expires_at.to_rfc3339(),
         ttl_remaining_sec: ttl_remaining,
-        tools: verify_mandate.capabilities.tools,
+        tools: mandate.capabilities.tools,
     })
-}
-
-/// Verify only the ed25519 signature on a mandate — no TTL check.
-///
-/// Used by `decide()` so that the TTL check can be performed with an
-/// injected clock rather than `Utc::now()` called inside here.
-pub fn verify_signature(mandate_str: &str) -> Result<(), A2gError> {
-    let mandate: Mandate =
-        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
-    let sig = mandate
-        .signature
-        .as_ref()
-        .ok_or_else(|| A2gError::MandateInvalid("mandate is unsigned".to_string()))?;
-    if sig.algorithm != "ed25519" {
-        return Err(A2gError::MandateInvalid(format!(
-            "unsupported algorithm: {}",
-            sig.algorithm
-        )));
-    }
-    let mut m = mandate;
-    let sig_clone = m
-        .signature
-        .take()
-        .ok_or_else(|| A2gError::Internal("mandate signature unexpectedly absent".to_string()))?;
-    let payload = mandate_signing_payload(
-        &m.mandate.agent_did,
-        &m.mandate.issuer,
-        &m.mandate.expires_at,
-        &m.capabilities.tools,
-    );
-    let body_hash = Sha256::digest(payload.as_bytes());
-    let pubkey_bytes =
-        hex::decode(&sig_clone.issuer_pubkey).map_err(|e| A2gError::HexDecode(e.to_string()))?;
-    let pubkey_arr: [u8; 32] = pubkey_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| A2gError::InvalidKey)?;
-    let verifying_key = VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| A2gError::InvalidKey)?;
-    let sig_bytes =
-        hex::decode(&sig_clone.signature).map_err(|e| A2gError::HexDecode(e.to_string()))?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| A2gError::SignatureInvalid)?;
-    let signature = Signature::from_bytes(&sig_arr);
-    verifying_key
-        .verify(&body_hash, &signature)
-        .map_err(|_| A2gError::SignatureInvalid)?;
-    Ok(())
-}
-
-/// Parse a mandate from TOML string
-pub fn parse_mandate(mandate_str: &str) -> Result<Mandate, A2gError> {
-    let mandate: Mandate =
-        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
-    Ok(mandate)
 }
 
 #[cfg(test)]
@@ -480,17 +398,85 @@ mod tests {
     use super::*;
     use crate::identity;
 
+    /// Helper: compile+sign a mandate template to CBOR bytes for tests.
+    /// Mirrors the CLI compile_mandate logic without the toml dep in core.
+    /// Tests that need CBOR must use this helper.
+    fn compile_test_mandate(tools: Vec<String>, ttl_hours: u64) -> (Vec<u8>, String) {
+        use crate::cbor::{encode_canonical, CborMandate, MandateTbs};
+        use ed25519_dalek::Signer;
+
+        let (agent_did, _, _) = identity::generate_agent_keypair();
+        let (_, sovereign_secret, _) = identity::generate_agent_keypair();
+        let secret_bytes = hex::decode(&sovereign_secret).unwrap();
+        let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into().unwrap();
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
+        let verifying_key = signing_key.verifying_key();
+
+        let now = chrono::Utc::now();
+        let expires = now
+            .checked_add_signed(chrono::Duration::hours(ttl_hours as i64))
+            .unwrap_or(now);
+        let issuer_did = format!(
+            "did:a2g:{}",
+            bs58::encode(verifying_key.to_bytes()).into_string()
+        );
+        let cap_hash_hex = capabilities_hash(&tools);
+        let cap_hash_bytes = hex::decode(&cap_hash_hex).unwrap();
+
+        let tbs = MandateTbs {
+            tag: "MANDATE".to_string(),
+            agent_did: agent_did.clone(),
+            issuer_did: issuer_did.clone(),
+            agent_name: "test-agent".to_string(),
+            issued_at: now.to_rfc3339(),
+            expires_at: expires.to_rfc3339(),
+            proposal_hash: String::new(),
+            workspace_root: String::new(),
+            capabilities_hash: cap_hash_bytes.into(),
+            tools: tools.clone(),
+            fs_read: vec![],
+            fs_write: vec![],
+            fs_deny: vec![],
+            net_allow: vec![],
+            net_deny: vec![],
+            cmd_allow: vec![],
+            cmd_deny: vec![],
+            max_calls_per_minute: 60,
+            max_file_size_bytes: 10_485_760,
+            max_output_tokens: 4096,
+            max_session_duration_sec: 3600,
+            deny_patterns: vec![],
+            redact_patterns: vec![],
+            max_output_length: 50_000,
+            region: String::new(),
+            regulatory_framework: String::new(),
+            environment: String::new(),
+            classification: String::new(),
+            operating_hours: String::new(),
+            escalate_tools: vec![],
+            escalate_paths: vec![],
+            escalate_hosts: vec![],
+            escalate_to: String::new(),
+        };
+
+        let tbs_bytes = encode_canonical(&tbs).unwrap();
+        let sig = signing_key.sign(&tbs_bytes);
+        let envelope = CborMandate {
+            tag: "MANDATE-V1".to_string(),
+            tbs: tbs_bytes.into(),
+            signature: sig.to_bytes().to_vec().into(),
+            issuer_pubkey: verifying_key.to_bytes().to_vec().into(),
+        };
+        let cbor = encode_canonical(&envelope).unwrap();
+        (cbor, sovereign_secret)
+    }
+
     #[test]
     fn test_sign_and_verify() {
-        let (did, _, _) = identity::generate_agent_keypair();
-        let (_, sovereign_secret, _) = identity::generate_agent_keypair();
-
-        let template = generate_template("test-agent", &did);
-        let signed = sign_mandate(&template, &sovereign_secret, 24).unwrap();
-        let info = verify_mandate(&signed).unwrap();
-
+        let tools = vec!["read_file".to_string(), "write_file".to_string()];
+        let (cbor, _) = compile_test_mandate(tools, 24);
+        let info = verify_cbor_mandate(&cbor, chrono::Utc::now()).unwrap();
         assert_eq!(info.agent_name, "test-agent");
-        assert_eq!(info.agent_did, did);
         assert!(info.ttl_remaining_sec > 0);
     }
 
@@ -501,70 +487,62 @@ mod tests {
         assert!(template.contains("did:a2g:test123"));
     }
 
-    /// Asserts the exact byte layout of the canonical signing payload so a future
-    /// serializer or formatting change cannot silently drift from SPEC §4.5.
-    ///
-    /// Payload: `MANDATE:<agent_did>:<issuer_did>:<expires_at>:<capabilities_hash>`
-    /// capabilities_hash: SHA-256(tools sorted lexicographically, joined with `\n`)
+    /// Pin the capabilities_hash algorithm so a serializer change cannot silently
+    /// drift the signing payload (§4.5 normative rule, ADR-0013).
     #[test]
-    fn test_signing_payload_exact_bytes() {
-        // Fixed inputs — do not change without bumping the mandate schema version.
-        let agent_did = "did:a2g:AgentAAA";
-        let issuer_did = "did:a2g:IssuerBBB";
-        let expires_at = "2099-01-01T00:00:00Z";
+    fn test_capabilities_hash_exact_bytes() {
         let tools = vec![
             "vehicle.door.unlock".to_string(),
             "vehicle.climate.set_temperature".to_string(),
         ];
-
-        // Sorted lexicographically:
-        //   vehicle.climate.set_temperature
-        //   vehicle.door.unlock
-        // Joined with \n:
-        //   "vehicle.climate.set_temperature\nvehicle.door.unlock"
         let expected_joined = "vehicle.climate.set_temperature\nvehicle.door.unlock";
-        let expected_cap_hash = hex::encode(Sha256::digest(expected_joined.as_bytes()));
-
-        let expected_payload = format!(
-            "MANDATE:{}:{}:{}:{}",
-            agent_did, issuer_did, expires_at, expected_cap_hash
-        );
-
-        let actual_payload = mandate_signing_payload(agent_did, issuer_did, expires_at, &tools);
-
+        let expected = hex::encode(Sha256::digest(expected_joined.as_bytes()));
         assert_eq!(
-            actual_payload, expected_payload,
-            "Signing payload byte layout has drifted from SPEC §4.5. \
-             Changing this is a breaking protocol change — update CHANGELOG."
+            capabilities_hash(&tools),
+            expected,
+            "capabilities_hash algorithm has drifted from SPEC §4.5"
         );
-
-        // Also assert capabilities_hash directly.
-        assert_eq!(capabilities_hash(&tools), expected_cap_hash);
     }
 
     #[test]
     fn test_capabilities_hash_sort_order() {
-        // Unsorted input must produce the same hash as sorted input.
-        let tools_unsorted = vec![
-            "z_tool".to_string(),
-            "a_tool".to_string(),
-            "m_tool".to_string(),
-        ];
-        let tools_sorted = vec![
-            "a_tool".to_string(),
-            "m_tool".to_string(),
-            "z_tool".to_string(),
-        ];
-        assert_eq!(
-            capabilities_hash(&tools_unsorted),
-            capabilities_hash(&tools_sorted)
-        );
+        let unsorted = vec!["z_tool".to_string(), "a_tool".to_string(), "m_tool".to_string()];
+        let sorted = vec!["a_tool".to_string(), "m_tool".to_string(), "z_tool".to_string()];
+        assert_eq!(capabilities_hash(&unsorted), capabilities_hash(&sorted));
     }
 
     #[test]
     fn test_capabilities_hash_empty() {
-        // Empty capability list: SHA-256 of "" (empty string).
         let expected = hex::encode(Sha256::digest(b""));
         assert_eq!(capabilities_hash(&[]), expected);
+    }
+
+    #[test]
+    fn test_cbor_mandate_round_trip() {
+        let tools = vec!["read_file".to_string()];
+        let (cbor, _) = compile_test_mandate(tools.clone(), 24);
+        let (mandate, envelope) = parse_cbor_mandate_raw(&cbor).unwrap();
+        verify_cbor_signature(&envelope).unwrap();
+        assert_eq!(mandate.capabilities.tools, tools);
+    }
+
+    #[test]
+    fn test_malformed_cbor_mandate_rejected() {
+        let result = parse_cbor_mandate_raw(b"not cbor");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tampered_signature_rejected() {
+        use crate::cbor::{decode_canonical, encode_canonical, CborMandate};
+        let tools = vec!["read_file".to_string()];
+        let (cbor, _) = compile_test_mandate(tools, 24);
+        let mut envelope: CborMandate = decode_canonical(&cbor).unwrap();
+        let mut sig = envelope.signature.to_vec();
+        sig[0] = if sig[0] == 0x00 { 0xff } else { 0x00 };
+        envelope.signature = sig.into();
+        let tampered = encode_canonical(&envelope).unwrap();
+        let (_, envelope2) = parse_cbor_mandate_raw(&tampered).unwrap();
+        assert!(verify_cbor_signature(&envelope2).is_err());
     }
 }
