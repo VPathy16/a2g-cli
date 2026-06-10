@@ -28,6 +28,10 @@ minicbor = { workspace = true }
 criterion = { version = "0.5", features = ["html_reports"] }
 # Property-based tests for panic-freedom on extreme/malformed inputs (feat/panic-free-core)
 proptest = "1"
+# Used by panic_freedom integration tests to build CBOR mandates
+ed25519-dalek = { workspace = true }
+bs58 = { workspace = true }
+hex = { workspace = true }
 
 [[bench]]
 name = "decide"

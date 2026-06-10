@@ -85,38 +85,90 @@ impl Drop for GatewayHandle {
 
 // ── Mandate helpers ───────────────────────────────────────────────────────────
 
-fn comfort_mandate() -> String {
-    let (did, _, _) = a2g_core::identity::generate_agent_keypair();
+fn make_cbor_mandate(agent_name: &str, tools: &[&str], escalate_tools: &[&str]) -> Vec<u8> {
+    use a2g_core::cbor::{encode_canonical, CborMandate, MandateTbs};
+    use a2g_core::mandate::capabilities_hash;
+
+    let (agent_did, _, _) = a2g_core::identity::generate_agent_keypair();
     let (_, secret, _) = a2g_core::identity::generate_agent_keypair();
-    let mut tmpl = a2g_core::mandate::generate_template("gw-comfort-test", &did);
-    tmpl = tmpl.replace(
-        r#"tools = ["read_file", "write_file"]"#,
-        r#"tools = ["vehicle.climate.set_temperature"]"#,
-    );
-    a2g_core::mandate::sign_mandate(&tmpl, &secret, 24).unwrap()
+    let secret_bytes = hex::decode(&secret).unwrap();
+    let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into().unwrap();
+    let sk = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
+    let vk = sk.verifying_key();
+
+    let now = Utc::now();
+    let expires = now.checked_add_signed(Duration::hours(24)).unwrap_or(now);
+    let issuer_did = format!("did:a2g:{}", bs58::encode(vk.to_bytes()).into_string());
+    let tools_owned: Vec<String> = tools.iter().map(|s| s.to_string()).collect();
+    let escalate_owned: Vec<String> = escalate_tools.iter().map(|s| s.to_string()).collect();
+    let cap_hash_bytes = hex::decode(capabilities_hash(&tools_owned)).unwrap();
+    let escalate_to = if escalate_owned.is_empty() {
+        String::new()
+    } else {
+        "did:a2g:approver".to_string()
+    };
+
+    let tbs = MandateTbs {
+        tag: "MANDATE".to_string(),
+        agent_did,
+        issuer_did,
+        agent_name: agent_name.to_string(),
+        issued_at: now.to_rfc3339(),
+        expires_at: expires.to_rfc3339(),
+        proposal_hash: String::new(),
+        workspace_root: String::new(),
+        capabilities_hash: cap_hash_bytes.into(),
+        tools: tools_owned,
+        fs_read: vec![],
+        fs_write: vec![],
+        fs_deny: vec![],
+        net_allow: vec![],
+        net_deny: vec![],
+        cmd_allow: vec![],
+        cmd_deny: vec![],
+        max_calls_per_minute: 60,
+        max_file_size_bytes: 10_485_760,
+        max_output_tokens: 4096,
+        max_session_duration_sec: 3600,
+        deny_patterns: vec![],
+        redact_patterns: vec![],
+        max_output_length: 50_000,
+        region: String::new(),
+        regulatory_framework: String::new(),
+        environment: String::new(),
+        classification: String::new(),
+        operating_hours: String::new(),
+        escalate_tools: escalate_owned,
+        escalate_paths: vec![],
+        escalate_hosts: vec![],
+        escalate_to,
+    };
+
+    let tbs_bytes = encode_canonical(&tbs).unwrap();
+    let sig = sk.sign(&tbs_bytes);
+    let envelope = CborMandate {
+        tag: "MANDATE-V1".to_string(),
+        tbs: tbs_bytes.into(),
+        signature: sig.to_bytes().to_vec().into(),
+        issuer_pubkey: vk.to_bytes().to_vec().into(),
+    };
+    encode_canonical(&envelope).unwrap()
 }
 
-fn forbidden_mandate() -> String {
-    let (did, _, _) = a2g_core::identity::generate_agent_keypair();
-    let (_, secret, _) = a2g_core::identity::generate_agent_keypair();
-    let mut tmpl = a2g_core::mandate::generate_template("gw-forbidden-test", &did);
-    tmpl = tmpl.replace(
-        r#"tools = ["read_file", "write_file"]"#,
-        r#"tools = ["vehicle.powertrain.set_throttle"]"#,
-    );
-    a2g_core::mandate::sign_mandate(&tmpl, &secret, 24).unwrap()
+fn comfort_mandate() -> Vec<u8> {
+    make_cbor_mandate("gw-comfort-test", &["vehicle.climate.set_temperature"], &[])
 }
 
-fn sensitive_escalate_mandate() -> String {
-    let (did, _, _) = a2g_core::identity::generate_agent_keypair();
-    let (_, secret, _) = a2g_core::identity::generate_agent_keypair();
-    let mut tmpl = a2g_core::mandate::generate_template("gw-sensitive-test", &did);
-    tmpl = tmpl.replace(
-        r#"tools = ["read_file", "write_file"]"#,
-        r#"tools = ["WINDOW_POS"]"#,
-    );
-    tmpl = tmpl.replace("escalate_tools = []", r#"escalate_tools = ["WINDOW_POS"]"#);
-    a2g_core::mandate::sign_mandate(&tmpl, &secret, 24).unwrap()
+fn forbidden_mandate() -> Vec<u8> {
+    make_cbor_mandate(
+        "gw-forbidden-test",
+        &["vehicle.powertrain.set_throttle"],
+        &[],
+    )
+}
+
+fn sensitive_escalate_mandate() -> Vec<u8> {
+    make_cbor_mandate("gw-sensitive-test", &["WINDOW_POS"], &["WINDOW_POS"])
 }
 
 fn parked_state() -> VerifiedVehicleState {

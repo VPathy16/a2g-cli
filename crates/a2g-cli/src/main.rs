@@ -15,6 +15,7 @@
 // CLI-local modules (depend on the concrete SQLite ledger)
 mod ledger;
 mod lineage;
+mod mandate_compile;
 mod test_harness;
 mod trust_summary;
 mod visual_receipt;
@@ -700,7 +701,6 @@ fn cmd_sign(
     output_format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use chrono::DateTime;
-    use sha2::{Digest, Sha256};
 
     // Validate TTL
     validate_ttl(ttl_hours)?;
@@ -716,6 +716,11 @@ fn cmd_sign(
 
     let mandate_str = std::fs::read_to_string(mandate_path)?;
     let key_hex = std::fs::read_to_string(key_path)?.trim().to_string();
+
+    // Parse TOML mandate for compile step
+    let m = mandate_compile::parse_toml_mandate(&mandate_str)?;
+
+    let proposal_hash_for_tbs;
 
     if let Some(prop_path) = proposal_path {
         // Load and verify the approved proposal
@@ -736,8 +741,8 @@ fn cmd_sign(
             }
         }
 
-        // Compute SHA-256 of mandate body
-        let mandate_body_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
+        // Compute SHA-256 of mandate body (TOML text) for proposal anchoring
+        let mandate_body_hash = mandate_compile::mandate_body_hash(&mandate_str);
 
         // Compare to proposal.mandate_hash — prevents mandate modification after approval
         if mandate_body_hash != prop.mandate_hash {
@@ -752,14 +757,19 @@ fn cmd_sign(
             println!("  proposal:    {}", &prop.proposal_hash[..16]);
             println!("  status:      {}", prop.status);
         }
+        proposal_hash_for_tbs = prop.proposal_hash.clone();
     } else {
         // skip_proposal is true — emit governance-exception warning
         eprintln!("WARNING: signing without approved proposal (governance exception)");
+        proposal_hash_for_tbs = String::new();
     }
 
-    let signed = mandate::sign_mandate(&mandate_str, &key_hex, ttl_hours)?;
+    // Compile TOML mandate → signed CBOR
+    let cbor_bytes =
+        mandate_compile::compile_mandate(&m, &key_hex, ttl_hours, &proposal_hash_for_tbs)?;
 
-    std::fs::write(mandate_path, &signed)?;
+    // Write binary CBOR to the mandate path (replaces the TOML file)
+    std::fs::write(mandate_path, &cbor_bytes)?;
 
     if output_format == "json" {
         let output = serde_json::json!({
@@ -781,9 +791,9 @@ fn cmd_verify(
     mandate_path: &PathBuf,
     output_format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mandate_str = std::fs::read_to_string(mandate_path)?;
+    let mandate_cbor = std::fs::read(mandate_path)?;
 
-    match mandate::verify_mandate(&mandate_str) {
+    match mandate::verify_cbor_mandate(&mandate_cbor, chrono::Utc::now()) {
         Ok(info) => {
             if output_format == "json" {
                 let output = serde_json::json!({
@@ -840,7 +850,7 @@ fn cmd_enforce(
         return Err("params JSON exceeds maximum size of 1MB".into());
     }
 
-    let mandate_str = std::fs::read_to_string(mandate_path)?;
+    let mandate_cbor = std::fs::read(mandate_path)?;
     let mut params: serde_json::Value = serde_json::from_str(params_json)?;
 
     // Merge vehicle state into params so decide() can extract it via extract_vehicle_state()
@@ -920,8 +930,13 @@ fn cmd_enforce(
         // Get the leaf delegation for scope validation
         let leaf_delegation = chain.last().ok_or("authority chain is empty")?;
 
+        // Decode mandate (without full sig verification) to validate authority scope
+        let (decoded_mandate, _) =
+            mandate::parse_cbor_mandate_raw(&mandate_cbor).map_err(|e| e.to_string())?;
+
         // Validate mandate against authority scope
-        if let Err(e) = authority::validate_mandate_against_authority(&mandate_str, leaf_delegation)
+        if let Err(e) =
+            authority::validate_mandate_against_authority(&decoded_mandate, leaf_delegation)
         {
             if output_format == "json" {
                 let output = serde_json::json!({
@@ -972,7 +987,7 @@ fn cmd_enforce(
     }
 
     // Run enforcement
-    let mut verdict = enforce::enforce(&mandate_str, tool, &params, &db)?;
+    let mut verdict = enforce::enforce(&mandate_cbor, tool, &params, &db)?;
 
     // Phase 2: Set authority lineage on verdict
     verdict.delegation_chain_hash = delegation_chain_hash_val;
@@ -1133,9 +1148,10 @@ fn cmd_revoke(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use sha2::{Digest, Sha256};
 
-    let mandate_str = std::fs::read_to_string(mandate_path)?;
-    let m: mandate::Mandate = toml::from_str(&mandate_str)?;
-    let mandate_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
+    let mandate_cbor = std::fs::read(mandate_path)?;
+    let (m, _) = mandate::parse_cbor_mandate_raw(&mandate_cbor)
+        .map_err(|e| format!("failed to decode mandate: {}", e))?;
+    let mandate_hash = hex::encode(Sha256::digest(&mandate_cbor));
 
     let db = ledger::Ledger::open(ledger_path)?;
     db.revoke_mandate(
@@ -1344,9 +1360,16 @@ fn cmd_propose(
     validate_ttl(ttl_hours)?;
 
     let mandate_body = std::fs::read_to_string(mandate_path)?;
+    let mandate_parsed = mandate_compile::parse_toml_mandate(&mandate_body)?;
 
-    let prop =
-        proposal::create_proposal(proposer_did, name, &mandate_body, justification, ttl_hours)?;
+    let prop = proposal::create_proposal(
+        proposer_did,
+        name,
+        &mandate_parsed,
+        &mandate_body,
+        justification,
+        ttl_hours,
+    )?;
 
     // Write proposal JSON
     let json = serde_json::to_string_pretty(&prop)?;

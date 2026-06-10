@@ -15,9 +15,9 @@
 
 use a2g_core::enforce::{decide, Decision};
 use a2g_core::ledger::EnforceLedger;
-use a2g_core::mandate;
 use a2g_core::vehicle::{Actor, Gear, VehicleState, VerifiedVehicleState};
-use chrono::Utc;
+use chrono::{Duration, Utc};
+use ed25519_dalek::Signer;
 use proptest::prelude::*;
 
 // ── Shared test infrastructure ─────────────────────────────────────────────────
@@ -32,30 +32,69 @@ impl EnforceLedger for NoopLedger {
     }
 }
 
-/// Build a valid signed mandate at runtime using an ephemeral key.
-fn valid_mandate(tools: &[&str]) -> String {
-    let (did, _, _) = a2g_core::identity::generate_agent_keypair();
+/// Build a valid signed CBOR mandate for tests.
+fn valid_mandate(tools: &[&str]) -> Vec<u8> {
+    use a2g_core::cbor::{encode_canonical, CborMandate, MandateTbs};
+    use a2g_core::mandate::capabilities_hash;
+
+    let (agent_did, _, _) = a2g_core::identity::generate_agent_keypair();
     let (_, secret, _) = a2g_core::identity::generate_agent_keypair();
-    let tools_str = tools
-        .iter()
-        .map(|t| format!(r#""{}""#, t))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let template = format!(
-        "[mandate]\nversion = \"0.1.0\"\nagent_did = \"{did}\"\nagent_name = \"test\"\n\
-         issued_at = \"\"\nexpires_at = \"\"\nissuer = \"\"\nworkspace_root = \"\"\n\n\
-         [capabilities]\ntools = [{tools_str}]\n\n\
-         [boundaries]\nfs_read = []\nfs_write = []\nfs_deny = []\n\
-         net_allow = []\nnet_deny = []\ncmd_allow = []\ncmd_deny = []\n\n\
-         [limits]\nmax_calls_per_minute = 120\nmax_file_size_bytes = 10485760\n\
-         max_output_tokens = 4096\nmax_session_duration_sec = 3600\n\n\
-         [output_governance]\ndeny_patterns = []\nredact_patterns = []\nmax_output_length = 0\n\n\
-         [jurisdiction]\nregion = \"\"\nregulatory_framework = \"\"\nenvironment = \"\"\n\
-         classification = \"\"\noperating_hours = \"\"\n\n\
-         [escalation]\nescalate_tools = []\nescalate_paths = []\nescalate_hosts = []\n\
-         escalate_to = \"\"\n"
-    );
-    mandate::sign_mandate(&template, &secret, 24).expect("test mandate must sign")
+    let secret_bytes = hex::decode(&secret).unwrap();
+    let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into().unwrap();
+    let sk = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
+    let vk = sk.verifying_key();
+
+    let now = Utc::now();
+    let expires = now.checked_add_signed(Duration::hours(24)).unwrap_or(now);
+    let issuer_did = format!("did:a2g:{}", bs58::encode(vk.to_bytes()).into_string());
+    let tools_owned: Vec<String> = tools.iter().map(|s| s.to_string()).collect();
+    let cap_hash_bytes = hex::decode(capabilities_hash(&tools_owned)).unwrap();
+
+    let tbs = MandateTbs {
+        tag: "MANDATE".to_string(),
+        agent_did,
+        issuer_did,
+        agent_name: "test".to_string(),
+        issued_at: now.to_rfc3339(),
+        expires_at: expires.to_rfc3339(),
+        proposal_hash: String::new(),
+        workspace_root: String::new(),
+        capabilities_hash: cap_hash_bytes.into(),
+        tools: tools_owned,
+        fs_read: vec![],
+        fs_write: vec![],
+        fs_deny: vec![],
+        net_allow: vec![],
+        net_deny: vec![],
+        cmd_allow: vec![],
+        cmd_deny: vec![],
+        max_calls_per_minute: 120,
+        max_file_size_bytes: 10_485_760,
+        max_output_tokens: 4096,
+        max_session_duration_sec: 3600,
+        deny_patterns: vec![],
+        redact_patterns: vec![],
+        max_output_length: 0,
+        region: String::new(),
+        regulatory_framework: String::new(),
+        environment: String::new(),
+        classification: String::new(),
+        operating_hours: String::new(),
+        escalate_tools: vec![],
+        escalate_paths: vec![],
+        escalate_hosts: vec![],
+        escalate_to: String::new(),
+    };
+
+    let tbs_bytes = encode_canonical(&tbs).unwrap();
+    let sig = sk.sign(&tbs_bytes);
+    let envelope = CborMandate {
+        tag: "MANDATE-V1".to_string(),
+        tbs: tbs_bytes.into(),
+        signature: sig.to_bytes().to_vec().into(),
+        issuer_pubkey: vk.to_bytes().to_vec().into(),
+    };
+    encode_canonical(&envelope).unwrap()
 }
 
 // ── Fail-safe DENY contract ────────────────────────────────────────────────────
@@ -82,17 +121,17 @@ fn err_resolves_to_deny<E: std::fmt::Debug>(result: Result<a2g_core::enforce::Ve
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
-    /// Arbitrary mandate strings must not cause decide() to panic.
-    /// Malformed TOML, bad signatures, truncated payloads — all must return Err.
+    /// Arbitrary byte slices must not cause decide() to panic.
+    /// Malformed CBOR, bad signatures, truncated payloads — all must return Err.
     #[test]
-    fn prop_arbitrary_mandate_string_never_panics(
+    fn prop_arbitrary_mandate_bytes_never_panics(
         mandate_str in ".*",
         tool        in "[a-z_]{1,32}",
         params_str  in r#"\{[^}]{0,64}\}"#,
     ) {
         let params = serde_json::from_str(&params_str)
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-        let result = decide(&mandate_str, &tool, &params, &NoopLedger, Utc::now(), None);
+        let result = decide(mandate_str.as_bytes(), &tool, &params, &NoopLedger, Utc::now(), None);
         err_resolves_to_deny(result);
     }
 
@@ -202,7 +241,7 @@ proptest! {
 #[test]
 fn empty_mandate_is_not_panic() {
     let params = serde_json::json!({});
-    let result = decide("", "read_file", &params, &NoopLedger, Utc::now(), None);
+    let result = decide(b"", "read_file", &params, &NoopLedger, Utc::now(), None);
     assert!(result.is_err(), "empty mandate must return Err, not panic");
 }
 
@@ -210,7 +249,7 @@ fn empty_mandate_is_not_panic() {
 fn null_bytes_in_mandate_not_panic() {
     let params = serde_json::json!({});
     let result = decide(
-        "\0\0\0",
+        b"\0\0\0",
         "read_file",
         &params,
         &NoopLedger,
@@ -321,14 +360,14 @@ fn internal_error_resolves_to_deny_at_ffi_boundary() {
     // This proves the fail-safe contract is tested end-to-end.
     let params = serde_json::json!({});
     let result = decide(
-        "not-valid-toml",
+        b"not-valid-cbor",
         "read_file",
         &params,
         &NoopLedger,
         Utc::now(),
         None,
     );
-    assert!(result.is_err(), "invalid mandate must Err");
+    assert!(result.is_err(), "invalid mandate bytes must Err");
     // The FFI shim converts this Err to A2G_DECISION_ERROR which is treated as DENY.
     // Tested here by asserting no panic occurred.
 }

@@ -56,39 +56,72 @@ pub struct GrantPayload {
 #[derive(Debug, Encode, Decode, Clone)]
 #[cbor(array)]
 pub struct MandateTbs {
-    #[n(0)]  pub tag: String,
-    #[n(1)]  pub agent_did: String,
-    #[n(2)]  pub issuer_did: String,
-    #[n(3)]  pub agent_name: String,
-    #[n(4)]  pub issued_at: String,
-    #[n(5)]  pub expires_at: String,
-    #[n(6)]  pub proposal_hash: String,
-    #[n(7)]  pub workspace_root: String,
-    #[n(8)]  pub capabilities_hash: ByteVec,
-    #[n(9)]  pub tools: Vec<String>,
-    #[n(10)] pub fs_read: Vec<String>,
-    #[n(11)] pub fs_write: Vec<String>,
-    #[n(12)] pub fs_deny: Vec<String>,
-    #[n(13)] pub net_allow: Vec<String>,
-    #[n(14)] pub net_deny: Vec<String>,
-    #[n(15)] pub cmd_allow: Vec<String>,
-    #[n(16)] pub cmd_deny: Vec<String>,
-    #[n(17)] pub max_calls_per_minute: u64,
-    #[n(18)] pub max_file_size_bytes: u64,
-    #[n(19)] pub max_output_tokens: u64,
-    #[n(20)] pub max_session_duration_sec: u64,
-    #[n(21)] pub deny_patterns: Vec<String>,
-    #[n(22)] pub redact_patterns: Vec<String>,
-    #[n(23)] pub max_output_length: u64,
-    #[n(24)] pub region: String,
-    #[n(25)] pub regulatory_framework: String,
-    #[n(26)] pub environment: String,
-    #[n(27)] pub classification: String,
-    #[n(28)] pub operating_hours: String,
-    #[n(29)] pub escalate_tools: Vec<String>,
-    #[n(30)] pub escalate_paths: Vec<String>,
-    #[n(31)] pub escalate_hosts: Vec<String>,
-    #[n(32)] pub escalate_to: String,
+    #[n(0)]
+    pub tag: String,
+    #[n(1)]
+    pub agent_did: String,
+    #[n(2)]
+    pub issuer_did: String,
+    #[n(3)]
+    pub agent_name: String,
+    #[n(4)]
+    pub issued_at: String,
+    #[n(5)]
+    pub expires_at: String,
+    #[n(6)]
+    pub proposal_hash: String,
+    #[n(7)]
+    pub workspace_root: String,
+    #[n(8)]
+    pub capabilities_hash: ByteVec,
+    #[n(9)]
+    pub tools: Vec<String>,
+    #[n(10)]
+    pub fs_read: Vec<String>,
+    #[n(11)]
+    pub fs_write: Vec<String>,
+    #[n(12)]
+    pub fs_deny: Vec<String>,
+    #[n(13)]
+    pub net_allow: Vec<String>,
+    #[n(14)]
+    pub net_deny: Vec<String>,
+    #[n(15)]
+    pub cmd_allow: Vec<String>,
+    #[n(16)]
+    pub cmd_deny: Vec<String>,
+    #[n(17)]
+    pub max_calls_per_minute: u64,
+    #[n(18)]
+    pub max_file_size_bytes: u64,
+    #[n(19)]
+    pub max_output_tokens: u64,
+    #[n(20)]
+    pub max_session_duration_sec: u64,
+    #[n(21)]
+    pub deny_patterns: Vec<String>,
+    #[n(22)]
+    pub redact_patterns: Vec<String>,
+    #[n(23)]
+    pub max_output_length: u64,
+    #[n(24)]
+    pub region: String,
+    #[n(25)]
+    pub regulatory_framework: String,
+    #[n(26)]
+    pub environment: String,
+    #[n(27)]
+    pub classification: String,
+    #[n(28)]
+    pub operating_hours: String,
+    #[n(29)]
+    pub escalate_tools: Vec<String>,
+    #[n(30)]
+    pub escalate_paths: Vec<String>,
+    #[n(31)]
+    pub escalate_hosts: Vec<String>,
+    #[n(32)]
+    pub escalate_to: String,
 }
 
 /// CBOR mandate distribution envelope (ADR-0013).
@@ -100,10 +133,14 @@ pub struct MandateTbs {
 #[derive(Debug, Encode, Decode)]
 #[cbor(array)]
 pub struct CborMandate {
-    #[n(0)] pub tag: String,
-    #[n(1)] pub tbs: ByteVec,
-    #[n(2)] pub signature: ByteVec,
-    #[n(3)] pub issuer_pubkey: ByteVec,
+    #[n(0)]
+    pub tag: String,
+    #[n(1)]
+    pub tbs: ByteVec,
+    #[n(2)]
+    pub signature: ByteVec,
+    #[n(3)]
+    pub issuer_pubkey: ByteVec,
 }
 
 /// Encode `val` into canonical CBOR bytes.

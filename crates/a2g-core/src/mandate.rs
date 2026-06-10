@@ -97,10 +97,18 @@ pub struct Limits {
     pub max_session_duration_sec: u64,
 }
 
-fn default_rate() -> u64 { 60 }
-fn default_file_size() -> u64 { 10_485_760 }
-fn default_tokens() -> u64 { 4096 }
-fn default_session() -> u64 { 3600 }
+fn default_rate() -> u64 {
+    60
+}
+fn default_file_size() -> u64 {
+    10_485_760
+}
+fn default_tokens() -> u64 {
+    4096
+}
+fn default_session() -> u64 {
+    3600
+}
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct OutputGovernance {
@@ -112,7 +120,9 @@ pub struct OutputGovernance {
     pub max_output_length: u64,
 }
 
-fn default_output_len() -> u64 { 50_000 }
+fn default_output_len() -> u64 {
+    50_000
+}
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct MandateJurisdiction {
@@ -245,7 +255,9 @@ fn tbs_to_mandate(tbs: &MandateTbs) -> Mandate {
             proposal_hash: tbs.proposal_hash.clone(),
             workspace_root: tbs.workspace_root.clone(),
         },
-        capabilities: Capabilities { tools: tbs.tools.clone() },
+        capabilities: Capabilities {
+            tools: tbs.tools.clone(),
+        },
         boundaries: Boundaries {
             fs_read: tbs.fs_read.clone(),
             fs_write: tbs.fs_write.clone(),
@@ -287,7 +299,7 @@ fn tbs_to_mandate(tbs: &MandateTbs) -> Mandate {
 ///
 /// Used by `decide_core()`: step 0 (revocation check) needs `agent_did` and
 /// `mandate_hash` before the step 1 signature verification.
-pub(crate) fn parse_cbor_mandate_raw(cbor: &[u8]) -> Result<(Mandate, CborMandate), A2gError> {
+pub fn parse_cbor_mandate_raw(cbor: &[u8]) -> Result<(Mandate, CborMandate), A2gError> {
     let envelope: CborMandate = decode_canonical(cbor)?;
     if envelope.tag.as_str() != "MANDATE-V1" {
         return Err(A2gError::MandateInvalid(format!(
@@ -316,16 +328,12 @@ pub(crate) fn parse_cbor_mandate_raw(cbor: &[u8]) -> Result<(Mandate, CborMandat
 pub(crate) fn verify_cbor_signature(envelope: &CborMandate) -> Result<(), A2gError> {
     let tbs: MandateTbs = decode_canonical(&envelope.tbs)?;
 
-    let pubkey_arr: [u8; 32] = envelope
-        .issuer_pubkey
-        .as_ref()
-        .try_into()
-        .map_err(|_| A2gError::InvalidKey)?;
+    let pubkey_bytes: &[u8] = envelope.issuer_pubkey.as_ref();
+    let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| A2gError::InvalidKey)?;
     let verifying_key = VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| A2gError::InvalidKey)?;
 
-    let sig_arr: [u8; 64] = envelope
-        .signature
-        .as_ref()
+    let sig_bytes: &[u8] = envelope.signature.as_ref();
+    let sig_arr: [u8; 64] = sig_bytes
         .try_into()
         .map_err(|_| A2gError::SignatureInvalid)?;
     let sig = Signature::from_bytes(&sig_arr);
@@ -334,10 +342,7 @@ pub(crate) fn verify_cbor_signature(envelope: &CborMandate) -> Result<(), A2gErr
         .map_err(|_| A2gError::SignatureInvalid)?;
 
     // Verify issuer_did matches issuer_pubkey
-    let expected_issuer_did = format!(
-        "did:a2g:{}",
-        bs58::encode(&pubkey_arr).into_string()
-    );
+    let expected_issuer_did = format!("did:a2g:{}", bs58::encode(&pubkey_arr).into_string());
     if tbs.issuer_did != expected_issuer_did {
         return Err(A2gError::MandateInvalid(
             "issuer_did does not match issuer_pubkey".to_string(),
@@ -348,7 +353,8 @@ pub(crate) fn verify_cbor_signature(envelope: &CborMandate) -> Result<(), A2gErr
     let expected_hash = capabilities_hash(&tbs.tools);
     let expected_bytes =
         hex::decode(&expected_hash).map_err(|e| A2gError::HexDecode(e.to_string()))?;
-    if tbs.capabilities_hash.as_ref() != expected_bytes.as_slice() {
+    let cap_hash_bytes: &[u8] = tbs.capabilities_hash.as_ref();
+    if cap_hash_bytes != expected_bytes.as_slice() {
         return Err(A2gError::MandateInvalid(
             "capabilities_hash does not match tools list".to_string(),
         ));
@@ -506,8 +512,16 @@ mod tests {
 
     #[test]
     fn test_capabilities_hash_sort_order() {
-        let unsorted = vec!["z_tool".to_string(), "a_tool".to_string(), "m_tool".to_string()];
-        let sorted = vec!["a_tool".to_string(), "m_tool".to_string(), "z_tool".to_string()];
+        let unsorted = vec![
+            "z_tool".to_string(),
+            "a_tool".to_string(),
+            "m_tool".to_string(),
+        ];
+        let sorted = vec![
+            "a_tool".to_string(),
+            "m_tool".to_string(),
+            "z_tool".to_string(),
+        ];
         assert_eq!(capabilities_hash(&unsorted), capabilities_hash(&sorted));
     }
 

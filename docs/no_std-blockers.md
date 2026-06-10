@@ -16,13 +16,12 @@ The feature flag `default = ["std"]` is in place. Disabling it (`--no-default-fe
 | **Location** | ~~Return type of `decide()`, `enforce()`, and virtually every fallible function in the crate~~ |
 | **Resolution** | `A2gError` enum added in `crates/a2g-core/src/error.rs`. All public API functions in a2g-core now return `Result<_, A2gError>`. `core::fmt::Display` is the only bound; `std::error::Error` is gated behind `#[cfg(feature = "std")]`. `ApprovalGrantError` and `AttestationError` ad-hoc enums removed. See ADR-0012. |
 
-### 2. `toml` crate
+### ~~2. `toml` crate~~ — **RESOLVED (ADR-0013)**
 
 | | |
 |--|--|
-| **Location** | `mandate.rs` — `toml::from_str`, `toml::to_string_pretty` |
-| **Reason** | The `toml` crate (v0.8) has no `no_std` support; it depends on `std::collections::HashMap` and `std::io` |
-| **Candidate replacement** | `toml_edit` (also std-only at time of writing). Long-term: a `serde`-compatible TOML library that targets `alloc`-only, or switch mandate format to CBOR/MessagePack (`minicbor`, `postcard`). |
+| **Location** | ~~`mandate.rs` — `toml::from_str`, `toml::to_string_pretty`~~ |
+| **Resolution** | Mandates now distribute and verify as signed canonical CBOR (`minicbor`, RFC 8949). The `toml` dependency is removed from `a2g-core/Cargo.toml`. TOML remains the human authoring format but lives exclusively in the CLI layer (`a2g-cli/src/mandate_compile.rs`). `decide()` and all verification paths consume only CBOR bytes. See ADR-0013. |
 
 ### 3. `regex` crate
 
@@ -86,7 +85,7 @@ The feature flag `default = ["std"]` is in place. Disabling it (`--no-default-fe
 | Blocker | Severity | Scope | Effort to Fix |
 |---------|----------|-------|---------------|
 | ~~`Box<dyn std::error::Error>`~~ | ~~**High**~~ | ~~Entire public API~~ | **RESOLVED — ADR-0012** |
-| `toml` crate | **High** | Mandate parsing | Large — format change or new library |
+| ~~`toml` crate~~ | ~~**High**~~ | ~~Mandate parsing~~ | **RESOLVED — ADR-0013** |
 | `regex` crate | **Medium** | Output governance only | Medium — hand-rolled or `aho-corasick` |
 | `uuid` OsRng | **Medium** | `decide()` correlation ID | Small — make it a parameter |
 | `std::sync::Mutex` (receipt) | **Medium** | Receipt chaining | Medium — move to CLI layer |
@@ -96,8 +95,8 @@ The feature flag `default = ["std"]` is in place. Disabling it (`--no-default-fe
 
 The path of least resistance for a partial no_std build:
 1. ~~Blocker 1 resolved (ADR-0012).~~
-2. Resolve blockers 4, 6, 7, 8 (small effort).
-3. Gate `enforce()` under `#[cfg(feature = "std")]`.
-4. Move receipt chaining to the CLI (blocker 5).
-5. Replace `regex` with `aho-corasick` (blocker 3).
-6. Blocker 2 (`toml`) requires a format change and is out of scope until the protocol stabilises.
+2. ~~Blocker 2 resolved (ADR-0013). `toml` removed from `a2g-core`.~~
+3. Resolve blockers 4, 6, 7, 8 (small effort).
+4. Gate `enforce()` under `#[cfg(feature = "std")]`.
+5. Move receipt chaining to the CLI (blocker 5).
+6. Replace `regex` with `aho-corasick` (blocker 3).

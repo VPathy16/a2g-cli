@@ -398,12 +398,9 @@ pub fn verify_chain(chain: &[Delegation]) -> Result<ChainValidation, A2gError> {
 
 /// Validate that a mandate's permissions are within the authority's scope
 pub fn validate_mandate_against_authority(
-    mandate_str: &str,
+    m: &crate::mandate::Mandate,
     delegation: &Delegation,
 ) -> Result<(), A2gError> {
-    let m: crate::mandate::Mandate =
-        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
-
     // Check tools are within scope
     for tool in &m.capabilities.tools {
         if !delegation.scope.allowed_tools.is_empty()

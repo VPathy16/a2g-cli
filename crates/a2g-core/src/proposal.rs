@@ -140,10 +140,8 @@ impl std::fmt::Display for ReviewDecision {
     }
 }
 
-/// Assess risk level from a mandate TOML string
-pub fn assess_risk(mandate_str: &str) -> Result<RiskLevel, A2gError> {
-    let m: crate::mandate::Mandate =
-        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
+/// Assess risk level from a parsed mandate
+pub fn assess_risk(m: &crate::mandate::Mandate) -> Result<RiskLevel, A2gError> {
     let mut score: u32 = 0;
 
     // Tool risk scoring
@@ -203,15 +201,19 @@ pub fn assess_risk(mandate_str: &str) -> Result<RiskLevel, A2gError> {
     })
 }
 
-/// Create a new proposal for a mandate
+/// Create a new proposal for a mandate.
+///
+/// `mandate` is the parsed mandate struct; `mandate_body` is the raw TOML string
+/// used for hashing and storage.
 pub fn create_proposal(
     proposer_did: &str,
     proposal_name: &str,
+    mandate: &crate::mandate::Mandate,
     mandate_body: &str,
     justification: &str,
     proposal_ttl_hours: u64,
 ) -> Result<Proposal, A2gError> {
-    let risk_level = assess_risk(mandate_body)?;
+    let risk_level = assess_risk(mandate)?;
     let required_approvals = risk_level.required_approvals();
 
     let now = Utc::now();
@@ -416,13 +418,53 @@ pub fn verify_review(review: &Review, proposal_hash: &str) -> Result<(), A2gErro
 mod tests {
     use super::*;
     use crate::identity;
-    use crate::mandate;
+    use crate::mandate::{
+        Boundaries, Capabilities, EscalationRules, Limits, Mandate, MandateHeader,
+        MandateJurisdiction, OutputGovernance,
+    };
+
+    fn test_mandate_struct(proposer_did: &str) -> Mandate {
+        Mandate {
+            mandate: MandateHeader {
+                version: "0.1.0".to_string(),
+                agent_did: proposer_did.to_string(),
+                agent_name: "test".to_string(),
+                issued_at: String::new(),
+                expires_at: String::new(),
+                issuer: String::new(),
+                proposal_hash: String::new(),
+                workspace_root: String::new(),
+            },
+            capabilities: Capabilities {
+                tools: vec!["read_file".to_string(), "write_file".to_string()],
+            },
+            boundaries: Boundaries {
+                fs_read: vec!["workspace/**".to_string()],
+                fs_write: vec!["workspace/output/**".to_string()],
+                fs_deny: vec!["/etc/**".to_string()],
+                net_allow: vec![],
+                net_deny: vec!["*".to_string()],
+                cmd_allow: vec![],
+                cmd_deny: vec![],
+            },
+            limits: Limits {
+                max_calls_per_minute: 60,
+                max_file_size_bytes: 10_485_760,
+                max_output_tokens: 4096,
+                max_session_duration_sec: 3600,
+            },
+            output_governance: OutputGovernance::default(),
+            jurisdiction: MandateJurisdiction::default(),
+            escalation: EscalationRules::default(),
+            signature: None,
+        }
+    }
 
     #[test]
     fn test_risk_assessment() {
         let (did, _, _) = identity::generate_agent_keypair();
-        let template = mandate::generate_template("test", &did);
-        let risk = assess_risk(&template).unwrap();
+        let mandate = test_mandate_struct(&did);
+        let risk = assess_risk(&mandate).unwrap();
         // Default template has read_file + write_file + fs_deny rules
         assert!(risk == RiskLevel::Low || risk == RiskLevel::Medium);
     }
@@ -432,12 +474,14 @@ mod tests {
         let (proposer_did, _, _) = identity::generate_agent_keypair();
         let (_, reviewer1_secret, _) = identity::generate_agent_keypair();
 
+        let mandate = test_mandate_struct(&proposer_did);
         let template = crate::mandate::generate_template("test-agent", &proposer_did);
 
         // Create proposal
         let mut proposal = create_proposal(
             &proposer_did,
             "Deploy test agent",
+            &mandate,
             &template,
             "Need read/write access for data processing",
             48,
@@ -470,11 +514,13 @@ mod tests {
         let (proposer_did, _, _) = identity::generate_agent_keypair();
         let (_, reviewer_secret, _) = identity::generate_agent_keypair();
 
+        let mandate = test_mandate_struct(&proposer_did);
         let template = crate::mandate::generate_template("test-agent", &proposer_did);
 
         let mut proposal = create_proposal(
             &proposer_did,
             "Risky agent",
+            &mandate,
             &template,
             "Needs broad access",
             48,
@@ -498,10 +544,18 @@ mod tests {
         let (proposer_did, _, _) = identity::generate_agent_keypair();
         let (_, reviewer_secret, _) = identity::generate_agent_keypair();
 
+        let mandate = test_mandate_struct(&proposer_did);
         let template = crate::mandate::generate_template("test-agent", &proposer_did);
 
-        let mut proposal =
-            create_proposal(&proposer_did, "Test agent", &template, "Testing", 48).unwrap();
+        let mut proposal = create_proposal(
+            &proposer_did,
+            "Test agent",
+            &mandate,
+            &template,
+            "Testing",
+            48,
+        )
+        .unwrap();
 
         // Use RequestChanges so proposal stays Pending (Approve on low-risk would finalize it)
         review_proposal(

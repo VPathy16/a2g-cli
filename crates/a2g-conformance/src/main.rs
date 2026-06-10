@@ -13,7 +13,6 @@ use a2g_core::enforce::{decide, decide_with_approval, Decision};
 use a2g_core::hitl::ApprovalGrant;
 use a2g_core::identity::generate_agent_keypair;
 use a2g_core::ledger::NoopLedger;
-use a2g_core::mandate;
 use a2g_core::vehicle::{Actor, Gear, VehicleState, VerifiedVehicleState};
 use a2g_gateway::client::{send_request, sign_receipt_with_params};
 use a2g_gateway::keys::generate;
@@ -95,27 +94,20 @@ enum Outcome {
 
 // ── Mandate construction ──────────────────────────────────────────────────────
 
-/// Build and sign a mandate from vector input fields.
+/// Build a signed CBOR mandate from vector input fields (ADR-0013).
 ///
-/// Returns `(signed_mandate_toml, sovereign_secret_hex)` so callers can tamper
-/// the signature for bad-sig vectors.
-fn build_mandate(input: &VectorInput) -> (String, String) {
+/// Returns `(cbor_bytes, signing_key)` so callers can tamper the CBOR for
+/// bad-sig vectors.
+fn build_mandate(input: &VectorInput) -> (Vec<u8>, SigningKey) {
+    use a2g_core::cbor::{encode_canonical, CborMandate, MandateTbs};
+    use a2g_core::mandate::capabilities_hash;
+    use minicbor::bytes::ByteVec;
+
     let (agent_did, _, _) = generate_agent_keypair();
-    let (_, sovereign_secret, _) = generate_agent_keypair();
-
-    let tools_toml: String = input
-        .mandate_capabilities
-        .iter()
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let escalate_tools_toml: String = input
-        .mandate_escalate_tools
-        .iter()
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let verifying_key = signing_key.verifying_key();
+    let pubkey_bytes = verifying_key.to_bytes();
+    let issuer_did = format!("did:a2g:{}", bs58::encode(&pubkey_bytes).into_string());
 
     let workspace_root = input
         .mandate_workspace_root
@@ -135,181 +127,93 @@ fn build_mandate(input: &VectorInput) -> (String, String) {
         "did:a2g:conformance-approver".to_string()
     };
 
-    let fs_deny_toml: String = input
-        .mandate_fs_deny
-        .iter()
-        .map(|p| format!("\"{p}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let fs_read_toml: String = input
-        .mandate_fs_read
-        .iter()
-        .map(|p| format!("\"{p}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let fs_write_toml: String = input
-        .mandate_fs_write
-        .iter()
-        .map(|p| format!("\"{p}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let template = format!(
-        r#"[mandate]
-version = "0.1.0"
-agent_did = "{agent_did}"
-agent_name = "conformance-test"
-workspace_root = "{workspace_root}"
-
-[capabilities]
-tools = [{tools_toml}]
-
-[boundaries]
-fs_deny = [{fs_deny_toml}]
-fs_read = [{fs_read_toml}]
-fs_write = [{fs_write_toml}]
-
-[limits]
-max_calls_per_minute = {rate_limit}
-
-[jurisdiction]
-operating_hours = "{operating_hours}"
-
-[escalation]
-escalate_tools = [{escalate_tools_toml}]
-escalate_to = "{escalate_to}"
-"#,
-        agent_did = agent_did,
-        tools_toml = tools_toml,
-        workspace_root = workspace_root,
-        fs_deny_toml = fs_deny_toml,
-        fs_read_toml = fs_read_toml,
-        fs_write_toml = fs_write_toml,
-        rate_limit = input.mandate_rate_limit,
-        operating_hours = operating_hours,
-        escalate_tools_toml = escalate_tools_toml,
-        escalate_to = escalate_to,
-    );
-
-    let ttl = input.mandate_expires_in_hours.max(0) as u64;
-    let signed = mandate::sign_mandate(&template, &sovereign_secret, ttl).expect("sign_mandate");
-
-    (signed, sovereign_secret)
-}
-
-/// Tamper with a signed mandate's signature bytes so it fails verification.
-fn tamper_signature(signed_toml: &str) -> String {
-    // Find the signature = "..." line and flip the first two hex chars
-    signed_toml
-        .lines()
-        .map(|line| {
-            if line.starts_with("signature = \"") {
-                // Flip the first hex byte: 00→ff, ff→00, else swap nibbles
-                let inner = line
-                    .trim_start_matches("signature = \"")
-                    .trim_end_matches('"');
-                let tampered: String = if inner.len() >= 2 {
-                    let first_byte = &inner[..2];
-                    let tampered_byte = if first_byte == "00" {
-                        "ff".to_string()
-                    } else {
-                        "00".to_string()
-                    };
-                    format!("{}{}", tampered_byte, &inner[2..])
-                } else {
-                    inner.to_string()
-                };
-                format!("signature = \"{tampered}\"")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Build a mandate signed with the SPEC §4.5 canonical payload.
-///
-/// After the fix/mandate-signing-payload change, the implementation now uses this
-/// same canonical format, so this function and `build_mandate` produce compatible
-/// mandates. The function is kept separate so mv-004 explicitly exercises the
-/// spec-canonical path end-to-end.
-fn build_spec_signed_mandate(input: &VectorInput) -> String {
-    use chrono::Duration;
-    use ed25519_dalek::Signer;
-
-    let (agent_did, _, _) = generate_agent_keypair();
-    let (_, sovereign_secret_hex, sovereign_pubkey_hex) = generate_agent_keypair();
-    let secret_bytes = hex::decode(&sovereign_secret_hex).unwrap();
-    let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into().unwrap();
-    let signing_key = SigningKey::from_bytes(&secret_arr);
-
     let now = Utc::now();
-    let expires_at = (now + Duration::hours(input.mandate_expires_in_hours)).to_rfc3339();
+    let ttl = input.mandate_expires_in_hours.max(0) as u64;
+    let ttl_i64 = i64::try_from(ttl).unwrap_or(i64::MAX);
+    let expires_at = now
+        .checked_add_signed(Duration::hours(ttl_i64))
+        .unwrap_or(now);
 
-    let issuer_pubkey_bytes = hex::decode(&sovereign_pubkey_hex).unwrap();
-    let issuer_did = format!(
-        "did:a2g:{}",
-        bs58::encode(&issuer_pubkey_bytes).into_string()
-    );
+    let cap_hash_hex = capabilities_hash(&input.mandate_capabilities);
+    let cap_hash_bytes = hex::decode(&cap_hash_hex).expect("capabilities_hash decode");
 
-    // capabilities_hash: sort lexicographically, join with \n, SHA-256 (SPEC §4.5)
-    let cap_hash = a2g_core::mandate::capabilities_hash(&input.mandate_capabilities);
+    let tbs = MandateTbs {
+        tag: "MANDATE".to_string(),
+        agent_did: agent_did.clone(),
+        issuer_did: issuer_did.clone(),
+        agent_name: "conformance-test".to_string(),
+        issued_at: now.to_rfc3339(),
+        expires_at: expires_at.to_rfc3339(),
+        proposal_hash: String::new(),
+        workspace_root,
+        capabilities_hash: ByteVec::from(cap_hash_bytes),
+        tools: input.mandate_capabilities.clone(),
+        fs_read: input.mandate_fs_read.clone(),
+        fs_write: input.mandate_fs_write.clone(),
+        fs_deny: input.mandate_fs_deny.clone(),
+        net_allow: vec![],
+        net_deny: vec![],
+        cmd_allow: vec![],
+        cmd_deny: vec![],
+        max_calls_per_minute: input.mandate_rate_limit,
+        max_file_size_bytes: 10_485_760,
+        max_output_tokens: 4096,
+        max_session_duration_sec: 3600,
+        deny_patterns: vec![],
+        redact_patterns: vec![],
+        max_output_length: 50_000,
+        region: String::new(),
+        regulatory_framework: String::new(),
+        environment: String::new(),
+        classification: String::new(),
+        operating_hours,
+        escalate_tools: input.mandate_escalate_tools.clone(),
+        escalate_paths: vec![],
+        escalate_hosts: vec![],
+        escalate_to,
+    };
 
-    // Spec-canonical signing payload (§4.5)
-    let canonical = format!("MANDATE:{agent_did}:{issuer_did}:{expires_at}:{cap_hash}");
-    let payload_hash = Sha256::digest(canonical.as_bytes());
-    let sig: ed25519_dalek::Signature = signing_key.sign(&payload_hash);
-    let sig_hex = hex::encode(sig.to_bytes());
+    let tbs_bytes = encode_canonical(&tbs).expect("TBS encode");
+    let signature = signing_key.sign(&tbs_bytes);
+    let sig_bytes = signature.to_bytes().to_vec();
 
-    let tools_toml: String = input
-        .mandate_capabilities
-        .iter()
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let envelope = CborMandate {
+        tag: "MANDATE-V1".to_string(),
+        tbs: ByteVec::from(tbs_bytes),
+        signature: ByteVec::from(sig_bytes),
+        issuer_pubkey: ByteVec::from(pubkey_bytes.to_vec()),
+    };
 
-    format!(
-        r#"[mandate]
-version = "0.1.0"
-agent_did = "{agent_did}"
-agent_name = "conformance-spec-sign-test"
-issued_at = "{issued_at}"
-expires_at = "{expires_at}"
-issuer = "{issuer_did}"
+    let cbor = encode_canonical(&envelope).expect("envelope encode");
+    (cbor, signing_key)
+}
 
-[capabilities]
-tools = [{tools_toml}]
+/// Tamper with a signed CBOR mandate's signature bytes so it fails verification.
+///
+/// Decodes the `CborMandate` envelope, flips the first byte of the signature,
+/// and re-encodes.
+fn tamper_mandate_cbor(cbor: &[u8]) -> Vec<u8> {
+    use a2g_core::cbor::{decode_canonical, encode_canonical, CborMandate};
+    use minicbor::bytes::ByteVec;
 
-[boundaries]
+    let mut envelope: CborMandate = decode_canonical(cbor).expect("tamper: decode");
+    let mut sig_bytes: Vec<u8> = envelope.signature.to_vec();
+    if !sig_bytes.is_empty() {
+        sig_bytes[0] ^= 0xff; // flip first byte
+    }
+    envelope.signature = ByteVec::from(sig_bytes);
+    encode_canonical(&envelope).expect("tamper: re-encode")
+}
 
-[limits]
-max_calls_per_minute = {rate_limit}
-
-[jurisdiction]
-operating_hours = ""
-
-[escalation]
-escalate_tools = []
-escalate_to = ""
-
-[signature]
-algorithm = "ed25519"
-issuer_pubkey = "{sovereign_pubkey_hex}"
-signature = "{sig_hex}"
-signed_at = "{issued_at}"
-"#,
-        agent_did = agent_did,
-        issued_at = now.to_rfc3339(),
-        expires_at = expires_at,
-        issuer_did = issuer_did,
-        tools_toml = tools_toml,
-        rate_limit = input.mandate_rate_limit,
-        sovereign_pubkey_hex = sovereign_pubkey_hex,
-        sig_hex = sig_hex,
-    )
+/// Build a mandate signed with the SPEC §4.5 canonical CBOR payload.
+///
+/// Since ADR-0013, the spec-canonical path now uses the same CBOR encoding as
+/// `build_mandate`. The function is kept separate so mv-004 explicitly exercises
+/// the spec-canonical path end-to-end.
+fn build_spec_signed_mandate(input: &VectorInput) -> Vec<u8> {
+    // Both build paths now produce identical CBOR — delegate to build_mandate.
+    let (cbor, _) = build_mandate(input);
+    cbor
 }
 
 // ── Vehicle state ─────────────────────────────────────────────────────────────
@@ -414,14 +318,14 @@ fn run_vector_inner(v: &TestVector) -> Outcome {
     let input = &v.input;
 
     // ── Build mandate ──────────────────────────────────────────────────────────
-    let mandate_str = if input.mandate_use_spec_signing {
+    let mandate_cbor: Vec<u8> = if input.mandate_use_spec_signing {
         build_spec_signed_mandate(input)
     } else {
-        let (signed, _) = build_mandate(input);
+        let (cbor, _) = build_mandate(input);
         if input.mandate_bad_signature {
-            tamper_signature(&signed)
+            tamper_mandate_cbor(&cbor)
         } else {
-            signed
+            cbor
         }
     };
 
@@ -433,18 +337,18 @@ fn run_vector_inner(v: &TestVector) -> Outcome {
 
     // ── Gateway test path ──────────────────────────────────────────────────────
     if let Some(gw_test) = &input.gateway_test_type {
-        return run_gateway_vector(v, &mandate_str, vehicle_state.as_ref(), now, gw_test);
+        return run_gateway_vector(v, &mandate_cbor, vehicle_state.as_ref(), now, gw_test);
     }
 
     // ── Phase 2 test path ──────────────────────────────────────────────────────
     if let Some(grant_type) = &input.phase2_grant_type {
-        return run_phase2_vector(v, &mandate_str, vehicle_state.as_ref(), now, grant_type);
+        return run_phase2_vector(v, &mandate_cbor, vehicle_state.as_ref(), now, grant_type);
     }
 
     // ── Standard decide() path ────────────────────────────────────────────────
     let params = &input.params;
     let verdict = match decide(
-        &mandate_str,
+        &mandate_cbor,
         &input.capability,
         params,
         &NoopLedger,
@@ -467,7 +371,7 @@ fn run_vector_inner(v: &TestVector) -> Outcome {
 
 fn run_phase2_vector(
     v: &TestVector,
-    mandate_str: &str,
+    mandate_cbor: &[u8],
     vehicle_state: Option<&VerifiedVehicleState>,
     now: chrono::DateTime<Utc>,
     grant_type: &str,
@@ -477,7 +381,7 @@ fn run_phase2_vector(
 
     // Phase 1: must produce PendingApproval
     let phase1 = match decide(
-        mandate_str,
+        mandate_cbor,
         &input.capability,
         params,
         &NoopLedger,
@@ -598,7 +502,7 @@ fn run_phase2_vector(
     };
 
     let phase2 = match decide_with_approval(
-        mandate_str,
+        mandate_cbor,
         &input.capability,
         params,
         &NoopLedger,
@@ -636,7 +540,7 @@ fn run_phase2_vector(
 
 fn run_gateway_vector(
     v: &TestVector,
-    mandate_str: &str,
+    mandate_cbor: &[u8],
     vehicle_state: Option<&VerifiedVehicleState>,
     now: chrono::DateTime<Utc>,
     gw_test: &str,
@@ -652,7 +556,7 @@ fn run_gateway_vector(
         "enforce" => {
             // Standard ALLOW path: run decide(), sign the receipt, send to gateway
             let verdict = match decide(
-                mandate_str,
+                mandate_cbor,
                 &input.capability,
                 params,
                 &NoopLedger,
@@ -767,7 +671,7 @@ fn run_gateway_vector(
         "replay" => {
             // Send the same receipt twice — second must be refused with nonce error.
             let verdict = match decide(
-                mandate_str,
+                mandate_cbor,
                 &input.capability,
                 params,
                 &NoopLedger,
@@ -815,7 +719,7 @@ fn run_gateway_vector(
         "stale" => {
             // Receipt with issued_at_ms far in the past — freshness check should refuse.
             let verdict = match decide(
-                mandate_str,
+                mandate_cbor,
                 &input.capability,
                 params,
                 &NoopLedger,
@@ -949,7 +853,7 @@ fn run_gateway_vector(
             // mutating params_json does not affect the canonical signature but does affect
             // the request_hash recomputation, which is exactly what step 6 checks.
             let verdict = match decide(
-                mandate_str,
+                mandate_cbor,
                 &input.capability,
                 params,
                 &NoopLedger,
@@ -999,7 +903,7 @@ fn run_gateway_vector(
             // Phase 1 returns PENDING_APPROVAL; we send a Phase 2 Enforce receipt without
             // ever calling SignBinding / SubmitGrant, so step 7 must refuse.
             let phase1 = match decide(
-                mandate_str,
+                mandate_cbor,
                 &input.capability,
                 params,
                 &NoopLedger,

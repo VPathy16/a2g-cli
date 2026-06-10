@@ -222,11 +222,12 @@ fn make_error_verdict() -> Box<A2gVerdictHandle> {
 /// Evaluate a governance decision (Phase 1).
 ///
 /// # Parameters
-/// - `mandate_toml` — NUL-terminated TOML mandate string (UTF-8).
-/// - `tool`         — NUL-terminated tool name (UTF-8).
-/// - `params_json`  — NUL-terminated JSON object of tool parameters (UTF-8).
+/// - `mandate_cbor`     — Pointer to signed CBOR mandate bytes (ADR-0013).
+/// - `mandate_cbor_len` — Length of the CBOR buffer in bytes.
+/// - `tool`             — NUL-terminated tool name (UTF-8).
+/// - `params_json`      — NUL-terminated JSON object of tool parameters (UTF-8).
 ///   Pass `"{}"` for no parameters.
-/// - `state`        — Optional verified vehicle state handle, or NULL.
+/// - `state`            — Optional verified vehicle state handle, or NULL.
 ///   NULL triggers the fail-safe default (denies Sensitive tools).
 ///
 /// # Returns
@@ -237,18 +238,24 @@ fn make_error_verdict() -> Box<A2gVerdictHandle> {
 /// `*out_verdict` is always written on return (never NULL). Free with `a2g_verdict_free`.
 ///
 /// # Safety
-/// All pointer parameters must be valid NUL-terminated UTF-8 strings or NULL (for `state`).
+/// `mandate_cbor` must be valid for `mandate_cbor_len` bytes.
+/// `tool` and `params_json` must be valid NUL-terminated UTF-8 strings.
+/// `state` must be NULL or a valid non-freed handle.
 /// `out_verdict` must be a valid non-null writable pointer.
 #[no_mangle]
 pub unsafe extern "C" fn a2g_decide(
-    mandate_toml: *const c_char,
+    mandate_cbor: *const u8,
+    mandate_cbor_len: usize,
     tool: *const c_char,
     params_json: *const c_char,
     state: *const A2gVerifiedStateHandle,
     out_verdict: *mut *mut A2gVerdictHandle,
 ) -> A2gDecision {
     let result = panic::catch_unwind(|| {
-        let mandate = cstr_to_str(mandate_toml)?;
+        if mandate_cbor.is_null() {
+            return None;
+        }
+        let mandate = std::slice::from_raw_parts(mandate_cbor, mandate_cbor_len);
         let tool_s = cstr_to_str(tool)?;
         let params_s = cstr_to_str(params_json).unwrap_or("{}");
         let params: serde_json::Value = serde_json::from_str(params_s).ok()?;
@@ -283,14 +290,15 @@ pub unsafe extern "C" fn a2g_decide(
 /// Evaluate a governance decision with a pre-validated human approval (Phase 2).
 ///
 /// # Parameters
-/// - `mandate_toml`  — same mandate used in Phase 1.
-/// - `tool`          — same tool used in Phase 1.
-/// - `params_json`   — same parameters used in Phase 1.
-/// - `state`         — same vehicle state handle used in Phase 1, or NULL.
-/// - `binding_json`  — MAC-protected binding JSON from Phase 1.
+/// - `mandate_cbor`     — same CBOR mandate bytes used in Phase 1.
+/// - `mandate_cbor_len` — length of the CBOR buffer in bytes.
+/// - `tool`             — same tool used in Phase 1.
+/// - `params_json`      — same parameters used in Phase 1.
+/// - `state`            — same vehicle state handle used in Phase 1, or NULL.
+/// - `binding_json`     — MAC-protected binding JSON from Phase 1.
 ///   Obtain with `a2g_verdict_binding_json`. **Do not modify** — any field
 ///   change invalidates the MAC and returns `A2G_DECISION_ERROR`.
-/// - `grant_json`    — JSON-serialised `ApprovalGrant` from the human approver.
+/// - `grant_json`       — JSON-serialised `ApprovalGrant` from the human approver.
 ///
 /// # Returns
 /// `A2G_DECISION_ALLOW` on success; `A2G_DECISION_DENY` on policy failure;
@@ -301,7 +309,8 @@ pub unsafe extern "C" fn a2g_decide(
 /// Same requirements as `a2g_decide`.
 #[no_mangle]
 pub unsafe extern "C" fn a2g_decide_with_approval(
-    mandate_toml: *const c_char,
+    mandate_cbor: *const u8,
+    mandate_cbor_len: usize,
     tool: *const c_char,
     params_json: *const c_char,
     state: *const A2gVerifiedStateHandle,
@@ -310,7 +319,10 @@ pub unsafe extern "C" fn a2g_decide_with_approval(
     out_verdict: *mut *mut A2gVerdictHandle,
 ) -> A2gDecision {
     let result = panic::catch_unwind(|| {
-        let mandate = cstr_to_str(mandate_toml)?;
+        if mandate_cbor.is_null() {
+            return None;
+        }
+        let mandate = std::slice::from_raw_parts(mandate_cbor, mandate_cbor_len);
         let tool_s = cstr_to_str(tool)?;
         let params_s = cstr_to_str(params_json).unwrap_or("{}");
         let params: serde_json::Value = serde_json::from_str(params_s).ok()?;
@@ -567,26 +579,130 @@ pub unsafe extern "C" fn a2g_verified_state_free(handle: *mut A2gVerifiedStateHa
     }
 }
 
+// ── Internal CBOR mandate compile helper ─────────────────────────────────────
+
+/// Build a minimal signed CBOR mandate for testing/FFI smoke tests.
+///
+/// `tools` is the allow-list; `escalate_tools` triggers escalation.
+/// `signing_key` is used to sign and derive `issuer_did`.
+fn build_cbor_mandate_ffi(
+    agent_name: &str,
+    tools: &[String],
+    escalate_tools: &[String],
+    signing_key: &SigningKey,
+    ttl_hours: u64,
+) -> Option<Vec<u8>> {
+    use a2g_core::cbor::{encode_canonical, CborMandate, MandateTbs};
+    use a2g_core::mandate::capabilities_hash;
+    use chrono::Duration;
+    use minicbor::bytes::ByteVec;
+
+    let verifying_key = signing_key.verifying_key();
+    let pubkey_bytes = verifying_key.to_bytes();
+    let issuer_did = format!("did:a2g:{}", bs58::encode(&pubkey_bytes).into_string());
+
+    let now = chrono::Utc::now();
+    let ttl_i64 = i64::try_from(ttl_hours).unwrap_or(i64::MAX);
+    let expires_at = now
+        .checked_add_signed(Duration::hours(ttl_i64))
+        .unwrap_or(now);
+
+    let cap_hash_hex = capabilities_hash(tools);
+    let cap_hash_bytes = hex::decode(&cap_hash_hex).ok()?;
+
+    let tbs = MandateTbs {
+        tag: "MANDATE".to_string(),
+        agent_did: issuer_did.clone(),
+        issuer_did: issuer_did.clone(),
+        agent_name: agent_name.to_string(),
+        issued_at: now.to_rfc3339(),
+        expires_at: expires_at.to_rfc3339(),
+        proposal_hash: String::new(),
+        workspace_root: String::new(),
+        capabilities_hash: ByteVec::from(cap_hash_bytes),
+        tools: tools.to_vec(),
+        fs_read: vec![],
+        fs_write: vec![],
+        fs_deny: vec![],
+        net_allow: vec![],
+        net_deny: vec![],
+        cmd_allow: vec![],
+        cmd_deny: vec![],
+        max_calls_per_minute: 60,
+        max_file_size_bytes: 10_485_760,
+        max_output_tokens: 4096,
+        max_session_duration_sec: 3600,
+        deny_patterns: vec![],
+        redact_patterns: vec![],
+        max_output_length: 50_000,
+        region: String::new(),
+        regulatory_framework: String::new(),
+        environment: String::new(),
+        classification: String::new(),
+        operating_hours: String::new(),
+        escalate_tools: escalate_tools.to_vec(),
+        escalate_paths: vec![],
+        escalate_hosts: vec![],
+        escalate_to: String::new(),
+    };
+
+    let tbs_bytes = encode_canonical(&tbs).ok()?;
+    let signature = signing_key.sign(&tbs_bytes);
+    let sig_bytes = signature.to_bytes().to_vec();
+
+    let envelope = CborMandate {
+        tag: "MANDATE-V1".to_string(),
+        tbs: ByteVec::from(tbs_bytes),
+        signature: ByteVec::from(sig_bytes),
+        issuer_pubkey: ByteVec::from(pubkey_bytes.to_vec()),
+    };
+
+    encode_canonical(&envelope).ok()
+}
+
 // ── Test helper ───────────────────────────────────────────────────────────────
 
-/// Return a test mandate TOML string that callers can use in smoke tests.
+/// Return a signed CBOR mandate for smoke-testing the FFI.
 ///
-/// The returned buffer must be freed with `a2g_string_free`.
-/// Returns NULL on allocation failure.
+/// Writes the mandate CBOR bytes to `*out_cbor` (caller must free with `a2g_cbor_free`)
+/// and the byte count to `*out_len`. Returns 0 on success, -1 on failure.
+///
+/// # Safety
+/// `out_cbor` and `out_len` must be valid non-null writable pointers.
 #[no_mangle]
-pub extern "C" fn a2g_test_mandate_toml() -> *mut c_char {
+pub unsafe extern "C" fn a2g_test_mandate_cbor(out_cbor: *mut *mut u8, out_len: *mut usize) -> i32 {
     let result = panic::catch_unwind(|| {
-        let (did, _, _) = a2g_core::identity::generate_agent_keypair();
-        let (_, secret, _) = a2g_core::identity::generate_agent_keypair();
-        let template = a2g_core::mandate::generate_template("ffi-smoke-agent", &did);
-        a2g_core::mandate::sign_mandate(&template, &secret, 24).ok()
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        build_cbor_mandate_ffi(
+            "ffi-smoke-agent",
+            &["read_file".to_string(), "write_file".to_string()],
+            &[],
+            &signing_key,
+            24,
+        )
     });
     match result {
-        Ok(Some(s)) => match CString::new(s) {
-            Ok(cs) => cs.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        },
-        _ => std::ptr::null_mut(),
+        Ok(Some(bytes)) => {
+            let len = bytes.len();
+            let ptr = Box::into_raw(bytes.into_boxed_slice()) as *mut u8;
+            *out_cbor = ptr;
+            *out_len = len;
+            0
+        }
+        _ => -1,
+    }
+}
+
+/// Free CBOR bytes returned by `a2g_test_mandate_cbor`.
+///
+/// # Safety
+/// `ptr` must be either NULL or a pointer returned by `a2g_test_mandate_cbor`, and
+/// `len` must be the same length as was written to `*out_len`.
+/// After this call the pointer is invalid.
+#[no_mangle]
+pub unsafe extern "C" fn a2g_cbor_free(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() {
+        drop(Vec::from_raw_parts(ptr, len, len));
     }
 }
 
@@ -606,45 +722,60 @@ pub unsafe extern "C" fn a2g_string_free(ptr: *mut c_char) {
 // ── Rust-level tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use std::ffi::CString;
 
     unsafe fn decide_c(
-        mandate: &str,
+        mandate: &[u8],
         tool: &str,
         params: &str,
         state: *const A2gVerifiedStateHandle,
     ) -> (A2gDecision, *mut A2gVerdictHandle) {
-        let m = CString::new(mandate).unwrap();
         let t = CString::new(tool).unwrap();
         let p = CString::new(params).unwrap();
         let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
-        let d = a2g_decide(m.as_ptr(), t.as_ptr(), p.as_ptr(), state, &mut out);
+        let d = a2g_decide(
+            mandate.as_ptr(),
+            mandate.len(),
+            t.as_ptr(),
+            p.as_ptr(),
+            state,
+            &mut out,
+        );
         (d, out)
     }
 
-    fn test_mandate() -> String {
-        let (did, _, _) = a2g_core::identity::generate_agent_keypair();
-        let (_, secret, _) = a2g_core::identity::generate_agent_keypair();
-        let template = a2g_core::mandate::generate_template("ffi-test", &did);
-        a2g_core::mandate::sign_mandate(&template, &secret, 24).unwrap()
+    fn test_mandate() -> Vec<u8> {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        build_cbor_mandate_ffi(
+            "ffi-test",
+            &["read_file".to_string(), "write_file".to_string()],
+            &[],
+            &signing_key,
+            24,
+        )
+        .unwrap()
     }
 
     /// Mandate with `tool` in both `tools` and `escalate_tools` — triggers PendingApproval.
-    fn escalate_mandate(tool: &str) -> String {
-        let (did, _, _) = a2g_core::identity::generate_agent_keypair();
-        let (_, secret, _) = a2g_core::identity::generate_agent_keypair();
-        let mut template = a2g_core::mandate::generate_template("ffi-escalate-test", &did);
-        template = template.replace(
-            r#"tools = ["read_file", "write_file"]"#,
-            &format!(r#"tools = ["{}"]"#, tool),
-        );
-        template = template.replace(
-            "escalate_tools = []",
-            &format!(r#"escalate_tools = ["{}"]"#, tool),
-        );
-        a2g_core::mandate::sign_mandate(&template, &secret, 24).unwrap()
+    fn escalate_mandate(tool: &str) -> Vec<u8> {
+        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        build_cbor_mandate_ffi(
+            "ffi-escalate-test",
+            &[tool.to_string()],
+            &[tool.to_string()],
+            &signing_key,
+            24,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -702,6 +833,7 @@ mod tests {
             let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
             let d = a2g_decide(
                 std::ptr::null(),
+                0,
                 t.as_ptr(),
                 p.as_ptr(),
                 std::ptr::null(),
@@ -714,16 +846,15 @@ mod tests {
     }
 
     #[test]
-    fn test_test_mandate_toml_not_null() {
+    fn test_test_mandate_cbor_not_null() {
         unsafe {
-            let ptr = a2g_test_mandate_toml();
-            assert!(!ptr.is_null());
-            let s = CStr::from_ptr(ptr).to_str().unwrap();
-            assert!(
-                s.contains("[mandate]"),
-                "test mandate must contain [mandate]"
-            );
-            a2g_string_free(ptr);
+            let mut ptr: *mut u8 = std::ptr::null_mut();
+            let mut len: usize = 0;
+            let rc = a2g_test_mandate_cbor(&mut ptr, &mut len);
+            assert_eq!(rc, 0, "a2g_test_mandate_cbor must return 0");
+            assert!(!ptr.is_null(), "CBOR pointer must not be null");
+            assert!(len > 0, "CBOR length must be > 0");
+            a2g_cbor_free(ptr, len);
         }
     }
 
@@ -775,14 +906,14 @@ mod tests {
             let grant_json = serde_json::to_string(&grant).unwrap();
 
             // Phase 2 with the unmodified binding
-            let mandate_c = CString::new(mandate).unwrap();
             let tool_c = CString::new("WINDOW_POS").unwrap();
             let params_c = CString::new("{}").unwrap();
             let binding_c = CString::new(binding_json).unwrap();
             let grant_c = CString::new(grant_json).unwrap();
             let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
             let d2 = a2g_decide_with_approval(
-                mandate_c.as_ptr(),
+                mandate.as_ptr(),
+                mandate.len(),
                 tool_c.as_ptr(),
                 params_c.as_ptr(),
                 state,
@@ -800,8 +931,8 @@ mod tests {
         }
     }
 
-    /// Helper: run Phase 1 for WINDOW_POS escalate mandate, return (binding_json, mandate).
-    fn phase1_binding() -> (String, String) {
+    /// Helper: run Phase 1 for WINDOW_POS escalate mandate, return (binding_json, mandate_cbor).
+    fn phase1_binding() -> (String, Vec<u8>) {
         let mandate = escalate_mandate("WINDOW_POS");
         let state = a2g_verified_state_operator_trusted(0.0, 0, 0);
         assert!(!state.is_null());
@@ -832,7 +963,6 @@ mod tests {
         // Phase 2 with tampered binding — must return Error (MAC mismatch)
         unsafe {
             let state = a2g_verified_state_operator_trusted(0.0, 0, 0);
-            let mandate_c = CString::new(mandate).unwrap();
             let tool_c = CString::new("WINDOW_POS").unwrap();
             let params_c = CString::new("{}").unwrap();
             let binding_c = CString::new(tampered).unwrap();
@@ -840,7 +970,8 @@ mod tests {
             let grant_c = CString::new("{}").unwrap();
             let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
             let d = a2g_decide_with_approval(
-                mandate_c.as_ptr(),
+                mandate.as_ptr(),
+                mandate.len(),
                 tool_c.as_ptr(),
                 params_c.as_ptr(),
                 state,
@@ -870,14 +1001,14 @@ mod tests {
 
         unsafe {
             let state = a2g_verified_state_operator_trusted(0.0, 0, 0);
-            let mandate_c = CString::new(mandate).unwrap();
             let tool_c = CString::new("WINDOW_POS").unwrap();
             let params_c = CString::new("{}").unwrap();
             let binding_c = CString::new(tampered).unwrap();
             let grant_c = CString::new("{}").unwrap();
             let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
             let d = a2g_decide_with_approval(
-                mandate_c.as_ptr(),
+                mandate.as_ptr(),
+                mandate.len(),
                 tool_c.as_ptr(),
                 params_c.as_ptr(),
                 state,
