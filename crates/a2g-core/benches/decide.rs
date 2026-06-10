@@ -12,19 +12,11 @@ use serde_json::json;
 struct NoopLedger;
 
 impl EnforceLedger for NoopLedger {
-    fn is_revoked(
-        &self,
-        _agent_did: &str,
-        _mandate_hash: &str,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+    fn is_revoked(&self, _agent_did: &str, _mandate_hash: &str) -> Result<bool, a2g_core::A2gError> {
         Ok(false)
     }
 
-    fn count_recent(
-        &self,
-        _agent_did: &str,
-        _seconds: i64,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    fn count_recent(&self, _agent_did: &str, _seconds: i64) -> Result<u64, a2g_core::A2gError> {
         Ok(0)
     }
 }
