@@ -48,16 +48,17 @@ fn binding_key() -> &'static SigningKey {
     BINDING_KEY.get_or_init(|| SigningKey::generate(&mut OsRng))
 }
 
-/// Canonical signing payload: domain-separated, uses Unix seconds for `ttl_expires_at`
-/// to avoid any RFC3339 serialization ambiguity.
-fn binding_payload(b: &PendingApprovalBinding) -> String {
-    format!(
-        "BINDING:{}:{}:{}:{}",
-        b.binding_id,
-        b.request_hash,
-        b.escalate_to,
-        b.ttl_expires_at.timestamp()
-    )
+/// Canonical CBOR bytes for `PendingApprovalBinding` MAC (ADR-0011).
+fn binding_bytes(b: &PendingApprovalBinding) -> Option<Vec<u8>> {
+    let hash_bytes = hex::decode(&b.request_hash).ok()?;
+    a2g_core::cbor::encode_canonical(&a2g_core::cbor::BindingPayload {
+        tag: "BINDING".to_string(),
+        binding_id: b.binding_id.clone(),
+        request_hash: hash_bytes.into(),
+        escalate_to: b.escalate_to.clone(),
+        ttl_unix_secs: b.ttl_expires_at.timestamp(),
+    })
+    .ok()
 }
 
 /// Signed wrapper emitted by Phase 1 and consumed by Phase 2.
@@ -72,25 +73,22 @@ struct SignedBinding {
     a2g_mac: String,
 }
 
-fn sign_binding(b: &PendingApprovalBinding) -> SignedBinding {
-    let payload = binding_payload(b);
-    let sig: Signature = binding_key().sign(payload.as_bytes());
-    SignedBinding {
+fn sign_binding(b: &PendingApprovalBinding) -> Option<SignedBinding> {
+    let payload = binding_bytes(b)?;
+    let sig: Signature = binding_key().sign(&payload);
+    Some(SignedBinding {
         binding: b.clone(),
         a2g_mac: hex::encode(sig.to_bytes()),
-    }
+    })
 }
 
 /// Verify the MAC and return the inner binding, or `None` if tampered / malformed.
 fn verify_and_extract(signed_s: &str) -> Option<PendingApprovalBinding> {
     let signed: SignedBinding = serde_json::from_str(signed_s).ok()?;
-    let payload = binding_payload(&signed.binding);
+    let payload = binding_bytes(&signed.binding)?;
     let sig_bytes: [u8; 64] = hex::decode(&signed.a2g_mac).ok()?.try_into().ok()?;
     let sig = Signature::from_bytes(&sig_bytes);
-    binding_key()
-        .verifying_key()
-        .verify(payload.as_bytes(), &sig)
-        .ok()?;
+    binding_key().verifying_key().verify(&payload, &sig).ok()?;
     Some(signed.binding)
 }
 
@@ -149,7 +147,10 @@ impl A2gVerdictHandle {
         let (binding_id, request_hash, binding_json) = match &v.pending_approval {
             Some(p) => {
                 let signed = sign_binding(p);
-                let json = serde_json::to_string(&signed).unwrap_or_default();
+                let json = signed
+                    .as_ref()
+                    .and_then(|s| serde_json::to_string(s).ok())
+                    .unwrap_or_default();
                 (p.binding_id.clone(), p.request_hash.clone(), json)
             }
             None => (String::new(), String::new(), String::new()),
@@ -769,7 +770,8 @@ mod tests {
                 300,
                 Utc::now(),
                 "",
-            );
+            )
+            .expect("test grant must sign");
             let grant_json = serde_json::to_string(&grant).unwrap();
 
             // Phase 2 with the unmodified binding

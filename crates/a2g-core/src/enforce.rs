@@ -213,7 +213,9 @@ pub fn decide_with_approval<L: EnforceLedger>(
                 format!("approval_grant_invalid: {} mismatch", field)
             }
             ApprovalGrantError::Expired => "approval_grant_expired".to_string(),
-            ApprovalGrantError::InvalidSignature | ApprovalGrantError::InvalidPubkey => {
+            ApprovalGrantError::InvalidSignature
+            | ApprovalGrantError::InvalidPubkey
+            | ApprovalGrantError::EncodingError => {
                 format!("approval_grant_invalid: {}", e)
             }
         };
@@ -1482,7 +1484,8 @@ mod tests {
             300,
             grant_time,
             "",
-        );
+        )
+        .expect("test grant must sign");
 
         // Phase 2
         let v2 = decide_with_approval(
@@ -1541,7 +1544,8 @@ mod tests {
             300,
             now + chrono::Duration::seconds(1),
             "",
-        );
+        )
+        .expect("test grant must sign");
 
         let v2 = decide_with_approval(
             &signed,
@@ -1598,7 +1602,8 @@ mod tests {
             30, // 30s TTL — expired 3570s ago
             past,
             "",
-        );
+        )
+        .expect("test grant must sign");
 
         // Evaluate at `now` — grant is long expired
         let v2 = decide_with_approval(
@@ -1711,7 +1716,8 @@ mod tests {
             300,
             now,
             "",
-        );
+        )
+        .expect("test grant must sign");
 
         let v = decide_with_approval(
             &signed,
@@ -1777,7 +1783,8 @@ mod tests {
             600,
             t2,
             "phase1-receipt",
-        );
+        )
+        .expect("test grant must sign");
 
         let v2 = decide_with_approval(
             &signed,

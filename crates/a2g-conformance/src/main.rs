@@ -541,7 +541,8 @@ fn run_phase2_vector(
             300,
             now,
             &phase1_receipt_hash,
-        ),
+        )
+        .expect("conformance grant must sign"),
         "mismatched_hash" => ApprovalGrant::new_signed(
             &binding.binding_id,
             &hex::encode(Sha256::digest(b"wrong_request")), // wrong request_hash
@@ -550,7 +551,8 @@ fn run_phase2_vector(
             300,
             now,
             &phase1_receipt_hash,
-        ),
+        )
+        .expect("conformance grant must sign"),
         "expired" => {
             // Grant that expired 1 hour ago
             let past = now - Duration::hours(2);
@@ -563,6 +565,7 @@ fn run_phase2_vector(
                 past, // issued in the past so already expired
                 &phase1_receipt_hash,
             )
+            .expect("conformance grant must sign")
         }
         "wrong_binding_id" => ApprovalGrant::new_signed(
             &uuid::Uuid::new_v4().to_string(), // wrong binding_id
@@ -572,7 +575,8 @@ fn run_phase2_vector(
             300,
             now,
             &phase1_receipt_hash,
-        ),
+        )
+        .expect("conformance grant must sign"),
         "bad_signature" => {
             let mut grant = ApprovalGrant::new_signed(
                 &binding.binding_id,
@@ -582,7 +586,8 @@ fn run_phase2_vector(
                 300,
                 now,
                 &phase1_receipt_hash,
-            );
+            )
+            .expect("conformance grant must sign");
             // Corrupt the signature
             grant.signature = "00".repeat(64);
             grant
@@ -725,8 +730,8 @@ fn run_gateway_vector(
                 signature_hex: String::new(),
                 attested_state_json: None,
             };
-            let payload = receipt_partial.canonical_payload();
-            let sig: ed25519_dalek::Signature = signing_key.sign(payload.as_bytes());
+            let payload = receipt_partial.canonical_bytes().expect("canonical_bytes");
+            let sig: ed25519_dalek::Signature = signing_key.sign(&payload);
             let receipt = GatewayReceipt {
                 signature_hex: hex::encode(sig.to_bytes()),
                 ..receipt_partial
@@ -846,8 +851,8 @@ fn run_gateway_vector(
                 signature_hex: String::new(),
                 attested_state_json: None,
             };
-            let payload = receipt_partial.canonical_payload();
-            let sig: ed25519_dalek::Signature = signing_key.sign(payload.as_bytes());
+            let payload = receipt_partial.canonical_bytes().expect("canonical_bytes");
+            let sig: ed25519_dalek::Signature = signing_key.sign(&payload);
             let receipt = GatewayReceipt {
                 signature_hex: hex::encode(sig.to_bytes()),
                 ..receipt_partial
@@ -902,8 +907,8 @@ fn run_gateway_vector(
                 signature_hex: String::new(),
                 attested_state_json: None,
             };
-            let payload = receipt_partial.canonical_payload();
-            let sig: ed25519_dalek::Signature = signing_key.sign(payload.as_bytes());
+            let payload = receipt_partial.canonical_bytes().expect("canonical_bytes");
+            let sig: ed25519_dalek::Signature = signing_key.sign(&payload);
             let receipt = GatewayReceipt {
                 signature_hex: hex::encode(sig.to_bytes()),
                 ..receipt_partial
@@ -1039,8 +1044,8 @@ fn run_gateway_vector(
                 signature_hex: String::new(),
                 attested_state_json: None,
             };
-            let payload = receipt_partial.canonical_payload();
-            let sig: ed25519_dalek::Signature = signing_key.sign(payload.as_bytes());
+            let payload = receipt_partial.canonical_bytes().expect("canonical_bytes");
+            let sig: ed25519_dalek::Signature = signing_key.sign(&payload);
             let receipt = GatewayReceipt {
                 signature_hex: hex::encode(sig.to_bytes()),
                 ..receipt_partial
@@ -1059,6 +1064,51 @@ fn run_gateway_vector(
                 GatewayResponse::Enforced { .. } => {
                     let r = "gateway allowed Phase 2 without approved binding — step 7 failed"
                         .to_string();
+                    if v.known_failing {
+                        Outcome::KnownFail(r)
+                    } else {
+                        Outcome::Fail(r)
+                    }
+                }
+                other => {
+                    let r = format!("unexpected response: {other:?}");
+                    if v.known_failing {
+                        Outcome::KnownFail(r)
+                    } else {
+                        Outcome::Fail(r)
+                    }
+                }
+            }
+        }
+
+        "bad_cbor_receipt" => {
+            // Send a receipt whose request_hash is not valid hex. The gateway must
+            // reject it at step 2 (encoding error) without panicking.
+            let issued_at_ms = Utc::now().timestamp_millis();
+            let receipt = GatewayReceipt {
+                verdict_id: uuid::Uuid::new_v4().to_string(),
+                decision: "ALLOW".to_string(),
+                tool: input.capability.clone(),
+                params_json: params_json.clone(),
+                policy_rule: "all_checks_passed".to_string(),
+                state_trust: "none".to_string(),
+                binding_id: String::new(),
+                // Non-hex string — canonical_bytes() will fail at hex decode.
+                request_hash: "NOT_VALID_HEX_!@#$".to_string(),
+                issued_at_ms,
+                nonce_hex: hex::encode([0u8; 16]),
+                signature_hex: "00".repeat(64),
+                attested_state_json: None,
+            };
+            let resp = gw.send(&GatewayRequest::Enforce {
+                receipt: Box::new(receipt),
+            });
+            match resp {
+                GatewayResponse::Refused { reason } => {
+                    check_gateway_outcome(v, false, Some(&reason))
+                }
+                GatewayResponse::Enforced { .. } => {
+                    let r = "gateway allowed receipt with non-hex request_hash — encoding check missing".to_string();
                     if v.known_failing {
                         Outcome::KnownFail(r)
                     } else {

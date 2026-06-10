@@ -38,6 +38,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::cbor::{encode_canonical, GrantPayload};
+
 /// Default pending-approval TTL: 5 minutes.
 pub const PENDING_APPROVAL_TTL_MINUTES: i64 = 5;
 
@@ -95,6 +97,8 @@ pub enum ApprovalGrantError {
     InvalidSignature,
     /// `approver_pubkey` could not be decoded as a valid ed25519 key.
     InvalidPubkey,
+    /// CBOR payload encoding failed (malformed `request_hash` hex or internal error).
+    EncodingError,
 }
 
 impl std::fmt::Display for ApprovalGrantError {
@@ -106,6 +110,7 @@ impl std::fmt::Display for ApprovalGrantError {
             ApprovalGrantError::Expired => write!(f, "expired"),
             ApprovalGrantError::InvalidSignature => write!(f, "invalid signature"),
             ApprovalGrantError::InvalidPubkey => write!(f, "invalid approver pubkey"),
+            ApprovalGrantError::EncodingError => write!(f, "cbor encoding error"),
         }
     }
 }
@@ -130,8 +135,8 @@ pub fn compute_request_hash(
 impl ApprovalGrant {
     /// Create and sign a new grant. Used by the gateway or in tests.
     ///
-    /// Signs over the SHA-256 of
-    /// `"APPROVAL:<binding_id>:<request_hash>:<expires_at>"`.
+    /// Signs over the canonical CBOR encoding of
+    /// `["APPROVAL", binding_id, request_hash(bstr), expires_at]`.
     pub fn new_signed(
         binding_id: &str,
         request_hash: &str,
@@ -140,16 +145,16 @@ impl ApprovalGrant {
         ttl_seconds: u64,
         now: DateTime<Utc>,
         parent_receipt_hash: &str,
-    ) -> Self {
+    ) -> Result<Self, &'static str> {
         let ttl_secs = i64::try_from(ttl_seconds).unwrap_or(i64::MAX);
         let expires_at = now
             .checked_add_signed(Duration::seconds(ttl_secs))
             .unwrap_or(now)
             .to_rfc3339();
         let approver_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
-        let payload_hash = Self::payload_hash(binding_id, request_hash, &expires_at);
-        let sig: Signature = signing_key.sign(&payload_hash);
-        ApprovalGrant {
+        let payload_bytes = Self::payload_bytes(binding_id, request_hash, &expires_at)?;
+        let sig: Signature = signing_key.sign(&payload_bytes);
+        Ok(ApprovalGrant {
             binding_id: binding_id.to_string(),
             request_hash: request_hash.to_string(),
             approver_did: approver_did.to_string(),
@@ -157,7 +162,7 @@ impl ApprovalGrant {
             signature: hex::encode(sig.to_bytes()),
             expires_at,
             parent_receipt_hash: parent_receipt_hash.to_string(),
-        }
+        })
     }
 
     /// Validate this grant against its corresponding [`PendingApprovalBinding`].
@@ -202,16 +207,27 @@ impl ApprovalGrant {
             .try_into()
             .map_err(|_| ApprovalGrantError::InvalidSignature)?;
         let sig = Signature::from_bytes(&sig_arr);
-        let payload_hash =
-            Self::payload_hash(&self.binding_id, &self.request_hash, &self.expires_at);
+        let payload_bytes =
+            Self::payload_bytes(&self.binding_id, &self.request_hash, &self.expires_at)
+                .map_err(|_| ApprovalGrantError::EncodingError)?;
         verifying_key
-            .verify(&payload_hash, &sig)
+            .verify(&payload_bytes, &sig)
             .map_err(|_| ApprovalGrantError::InvalidSignature)?;
         Ok(())
     }
 
-    fn payload_hash(binding_id: &str, request_hash: &str, expires_at: &str) -> Vec<u8> {
-        let payload = format!("APPROVAL:{}:{}:{}", binding_id, request_hash, expires_at);
-        Sha256::digest(payload.as_bytes()).to_vec()
+    fn payload_bytes(
+        binding_id: &str,
+        request_hash: &str,
+        expires_at: &str,
+    ) -> Result<Vec<u8>, &'static str> {
+        let hash_bytes = hex::decode(request_hash).map_err(|_| "invalid request_hash hex")?;
+        let payload = GrantPayload {
+            tag: "APPROVAL".to_string(),
+            binding_id: binding_id.to_string(),
+            request_hash: hash_bytes.into(),
+            expires_at: expires_at.to_string(),
+        };
+        encode_canonical(&payload)
     }
 }

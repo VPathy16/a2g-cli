@@ -170,8 +170,15 @@ fn handle_sign_binding(binding_json: String, state: &Arc<GatewayState>) -> Gatew
     };
 
     // Sign with gateway's binding key (never shared — closes ADR-0009 interim).
-    let payload = binding_payload(&binding);
-    let sig: ed25519_dalek::Signature = state.keys.binding_signing_key.sign(payload.as_bytes());
+    let payload = match binding_bytes(&binding) {
+        Ok(b) => b,
+        Err(e) => {
+            return GatewayResponse::Error {
+                message: format!("binding encoding error: {e}"),
+            }
+        }
+    };
+    let sig: ed25519_dalek::Signature = state.keys.binding_signing_key.sign(&payload);
     let signed = SignedBindingWire {
         binding_id: binding.binding_id.clone(),
         request_hash: binding.request_hash.clone(),
@@ -264,7 +271,10 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
     }
 
     // ── Step 2: Signature validity ─────────────────────────────────────────────
-    let payload = receipt.canonical_payload();
+    let payload = match receipt.canonical_bytes() {
+        Ok(b) => b,
+        Err(e) => return refuse(&format!("receipt encoding error: {e}")),
+    };
     let sig_bytes: [u8; 64] = match hex::decode(&receipt.signature_hex)
         .ok()
         .and_then(|b| b.try_into().ok())
@@ -278,7 +288,7 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
     if state
         .keys
         .receipt_verifying_key
-        .verify(payload.as_bytes(), &sig)
+        .verify(&payload, &sig)
         .is_err()
     {
         return refuse("receipt signature verification failed");
@@ -408,16 +418,16 @@ struct SignedBindingWire {
     a2g_mac: String,
 }
 
-/// Canonical payload signed by the gateway's binding key.
-/// Format matches what a2g-ffi uses for cross-compatibility.
-fn binding_payload(b: &PendingApprovalBinding) -> String {
-    format!(
-        "BINDING:{}:{}:{}:{}",
-        b.binding_id,
-        b.request_hash,
-        b.escalate_to,
-        b.ttl_expires_at.timestamp()
-    )
+/// Canonical CBOR bytes signed by the gateway's binding key (ADR-0011).
+fn binding_bytes(b: &PendingApprovalBinding) -> Result<Vec<u8>, &'static str> {
+    let hash_bytes = hex::decode(&b.request_hash).map_err(|_| "invalid request_hash hex")?;
+    a2g_core::cbor::encode_canonical(&a2g_core::cbor::BindingPayload {
+        tag: "BINDING".to_string(),
+        binding_id: b.binding_id.clone(),
+        request_hash: hash_bytes.into(),
+        escalate_to: b.escalate_to.clone(),
+        ttl_unix_secs: b.ttl_expires_at.timestamp(),
+    })
 }
 
 /// Verify a signed binding blob produced by this gateway (used by Phase 2 receipt signers).
@@ -433,12 +443,10 @@ pub fn verify_signed_binding(
         escalate_to: wire.escalate_to.clone(),
         ttl_expires_at: ttl,
     };
-    let payload = binding_payload(&binding);
+    let payload = binding_bytes(&binding).ok()?;
     let sig_bytes: [u8; 64] = hex::decode(&wire.a2g_mac).ok()?.try_into().ok()?;
     let sig = Signature::from_bytes(&sig_bytes);
-    binding_key_verifying
-        .verify(payload.as_bytes(), &sig)
-        .ok()?;
+    binding_key_verifying.verify(&payload, &sig).ok()?;
     Some(binding)
 }
 

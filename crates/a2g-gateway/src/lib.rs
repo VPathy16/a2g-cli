@@ -96,8 +96,10 @@ pub mod client {
             attested_state_json,
         };
 
-        let payload = receipt_partial.canonical_payload();
-        let sig: ed25519_dalek::Signature = signing_key.sign(payload.as_bytes());
+        let payload = receipt_partial
+            .canonical_bytes()
+            .expect("receipt_partial canonical_bytes");
+        let sig: ed25519_dalek::Signature = signing_key.sign(&payload);
 
         GatewayReceipt {
             signature_hex: hex::encode(sig.to_bytes()),
@@ -137,8 +139,10 @@ pub mod client {
             attested_state_json,
         };
 
-        let payload = receipt_partial.canonical_payload();
-        let sig: ed25519_dalek::Signature = signing_key.sign(payload.as_bytes());
+        let payload = receipt_partial
+            .canonical_bytes()
+            .expect("receipt_partial canonical_bytes");
+        let sig: ed25519_dalek::Signature = signing_key.sign(&payload);
 
         GatewayReceipt {
             signature_hex: hex::encode(sig.to_bytes()),
