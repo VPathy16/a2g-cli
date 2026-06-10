@@ -12,7 +12,11 @@ use serde_json::json;
 struct NoopLedger;
 
 impl EnforceLedger for NoopLedger {
-    fn is_revoked(&self, _agent_did: &str, _mandate_hash: &str) -> Result<bool, a2g_core::A2gError> {
+    fn is_revoked(
+        &self,
+        _agent_did: &str,
+        _mandate_hash: &str,
+    ) -> Result<bool, a2g_core::A2gError> {
         Ok(false)
     }
 
