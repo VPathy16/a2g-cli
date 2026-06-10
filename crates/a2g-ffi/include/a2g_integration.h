@@ -50,8 +50,8 @@
  *  A2gVerifiedStateHandle *   a2g_verified_state_  a2g_verified_state_free()
  *                             operator_trusted()
  *
- *  char * (mandate TOML)      a2g_test_mandate_    a2g_string_free()
- *                             toml()
+ *  uint8_t * (mandate CBOR)   a2g_test_mandate_    a2g_cbor_free(ptr, len)
+ *                             cbor()
  *
  *  const char * (accessors)   library-internal     DO NOT free; valid until
  *  e.g. a2g_verdict_id()                           a2g_verdict_free() on owner
@@ -83,7 +83,7 @@
  *      to your approval backend (operator console, mobile push, etc.).
  *
  *   3. When the human approver returns a signed ApprovalGrant JSON, call:
- *        a2g_decide_with_approval(mandate, tool, params, state,
+ *        a2g_decide_with_approval(cbor, cbor_len, tool, params, state,
  *                                 binding, grant_json, &out_verdict);
  *
  *   Do NOT modify any field of binding_json between steps 1 and 3.  The MAC

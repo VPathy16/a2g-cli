@@ -4,7 +4,7 @@
  * Exercises three paths through the ABI:
  *   1. Comfort-domain ALLOW (read_file, no vehicle state required)
  *   2. Forbidden hard-deny (delete_all_data)
- *   3. Sensitive + escalate → PendingApproval (WINDOW_POS, parked, escalate_tools set)
+ *   3. Operator-trusted vehicle state — state_trust field on verdict
  *
  * This test links against liba2g_ffi.so / liba2g_ffi.a and uses only the
  * public ABI defined in include/a2g.h. It intentionally exercises
@@ -23,11 +23,11 @@
 
 #include "a2g.h"
 
-/* Use the built-in test mandate helper rather than an embedded literal. */
+/* Use the built-in test mandate helper to obtain signed CBOR bytes. */
 
-static void test_comfort_allow(const char *mandate) {
+static void test_comfort_allow(const uint8_t *cbor, uintptr_t cbor_len) {
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(mandate, "read_file", "{}", NULL, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "read_file", "{}", NULL, &verdict);
 
     assert(d == A2G_DECISION_ALLOW && "Comfort tool read_file must be ALLOW");
     assert(verdict != NULL);
@@ -40,9 +40,9 @@ static void test_comfort_allow(const char *mandate) {
     a2g_verdict_free(verdict);
 }
 
-static void test_forbidden_deny(const char *mandate) {
+static void test_forbidden_deny(const uint8_t *cbor, uintptr_t cbor_len) {
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(mandate, "delete_all_data", "{}", NULL, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "delete_all_data", "{}", NULL, &verdict);
 
     assert(d == A2G_DECISION_DENY && "Forbidden tool delete_all_data must be DENY");
     assert(verdict != NULL);
@@ -52,13 +52,13 @@ static void test_forbidden_deny(const char *mandate) {
     a2g_verdict_free(verdict);
 }
 
-static void test_operator_trusted_state_trust(const char *mandate) {
+static void test_operator_trusted_state_trust(const uint8_t *cbor, uintptr_t cbor_len) {
     /* Parked (gear=0), Driver (actor=0), 0 km/h — operator trusted. */
     A2gVerifiedStateHandle *state = a2g_verified_state_operator_trusted(0.0, 0, 0);
     assert(state != NULL && "operator_trusted state creation must succeed");
 
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(mandate, "read_file", "{}", state, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "read_file", "{}", state, &verdict);
 
     assert(d == A2G_DECISION_ALLOW);
     const char *trust = a2g_verdict_state_trust(verdict);
@@ -72,7 +72,7 @@ static void test_operator_trusted_state_trust(const char *mandate) {
 
 static void test_null_mandate_returns_error(void) {
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(NULL, "read_file", "{}", NULL, &verdict);
+    A2gDecision d = a2g_decide(NULL, 0, "read_file", "{}", NULL, &verdict);
     assert(d == A2G_DECISION_ERROR && "NULL mandate must return ERROR");
     assert(verdict != NULL);
     a2g_verdict_free(verdict);
@@ -89,20 +89,21 @@ static void test_invalid_gear_returns_null(void) {
 int main(void) {
     printf("A2G FFI smoke test\n");
 
-    char *mandate = a2g_test_mandate_toml();
-    if (mandate == NULL) {
-        fprintf(stderr, "FATAL: a2g_test_mandate_toml() returned NULL\n");
+    uint8_t *cbor = NULL;
+    uintptr_t cbor_len = 0;
+    if (a2g_test_mandate_cbor(&cbor, &cbor_len) != 0 || cbor == NULL) {
+        fprintf(stderr, "FATAL: a2g_test_mandate_cbor() failed\n");
         return 1;
     }
-    printf("  mandate obtained (%zu bytes)\n", strlen(mandate));
+    printf("  mandate obtained (%zu bytes)\n", (size_t)cbor_len);
 
-    test_comfort_allow(mandate);
-    test_forbidden_deny(mandate);
-    test_operator_trusted_state_trust(mandate);
+    test_comfort_allow(cbor, cbor_len);
+    test_forbidden_deny(cbor, cbor_len);
+    test_operator_trusted_state_trust(cbor, cbor_len);
     test_null_mandate_returns_error();
     test_invalid_gear_returns_null();
 
-    a2g_string_free(mandate);
+    a2g_cbor_free(cbor, cbor_len);
 
     printf("All smoke tests passed.\n");
     return 0;
