@@ -77,10 +77,11 @@ impl GatewayReceipt {
     /// Canonical CBOR bytes that are signed and verified (ADR-0011).
     ///
     /// Returns `Err` if `request_hash` or `nonce_hex` are not valid hex strings.
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, &'static str> {
-        let request_hash =
-            hex::decode(&self.request_hash).map_err(|_| "invalid request_hash hex")?;
-        let nonce = hex::decode(&self.nonce_hex).map_err(|_| "invalid nonce hex")?;
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, a2g_core::A2gError> {
+        let request_hash = hex::decode(&self.request_hash)
+            .map_err(|e| a2g_core::A2gError::HexDecode(e.to_string()))?;
+        let nonce = hex::decode(&self.nonce_hex)
+            .map_err(|e| a2g_core::A2gError::HexDecode(e.to_string()))?;
         let payload = ReceiptPayload {
             tag: "RECEIPT".to_string(),
             verdict_id: self.verdict_id.clone(),

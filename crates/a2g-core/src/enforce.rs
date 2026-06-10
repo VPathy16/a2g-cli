@@ -24,6 +24,7 @@
 //! - `canonicalize_path_logical`: one `Vec<&str>` + `join()` per path check.
 //! - `format!()` calls in policy-rule strings: unavoidable until policy rules are static strs.
 
+use crate::error::A2gError;
 use crate::hitl::{
     self, compute_request_hash, PendingApprovalBinding, PENDING_APPROVAL_TTL_MINUTES,
 };
@@ -120,7 +121,7 @@ pub fn decide<L: EnforceLedger>(
     ledger: &L,
     now: DateTime<Utc>,
     verified_state: Option<&VerifiedVehicleState>,
-) -> Result<Verdict, Box<dyn std::error::Error>> {
+) -> Result<Verdict, A2gError> {
     decide_core(
         mandate_str,
         tool,
@@ -159,10 +160,15 @@ pub fn decide_with_approval<L: EnforceLedger>(
     verified_state: Option<&VerifiedVehicleState>,
     pending: &PendingApprovalBinding,
     grant: &hitl::ApprovalGrant,
-) -> Result<Verdict, Box<dyn std::error::Error>> {
+) -> Result<Verdict, A2gError> {
     // We need the core fields for make_verdict before calling decide_core.
-    let params_hash = hex::encode(Sha256::digest(serde_json::to_string(params)?.as_bytes()));
-    let m: Mandate = toml::from_str(mandate_str)?;
+    let params_hash = hex::encode(Sha256::digest(
+        serde_json::to_string(params)
+            .map_err(|e| A2gError::Json(e.to_string()))?
+            .as_bytes(),
+    ));
+    let m: Mandate =
+        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
     let agent_did = m.mandate.agent_did.clone();
     let agent_name = m.mandate.agent_name.clone();
     let mandate_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
@@ -206,16 +212,13 @@ pub fn decide_with_approval<L: EnforceLedger>(
     }
 
     // ── Step 1 (Phase 2): Validate approval grant ──
-    use hitl::ApprovalGrantError;
     if let Err(e) = grant.verify_against_binding(pending, now) {
-        let rule = match e {
-            ApprovalGrantError::BindingMismatch { field } => {
+        let rule = match &e {
+            crate::error::A2gError::BindingMismatch { field } => {
                 format!("approval_grant_invalid: {} mismatch", field)
             }
-            ApprovalGrantError::Expired => "approval_grant_expired".to_string(),
-            ApprovalGrantError::InvalidSignature
-            | ApprovalGrantError::InvalidPubkey
-            | ApprovalGrantError::EncodingError => {
+            crate::error::A2gError::GrantExpired => "approval_grant_expired".to_string(),
+            _ => {
                 format!("approval_grant_invalid: {}", e)
             }
         };
@@ -251,10 +254,15 @@ fn decide_core<L: EnforceLedger>(
     now: DateTime<Utc>,
     verified_state: Option<&VerifiedVehicleState>,
     skip_escalation: bool,
-) -> Result<Verdict, Box<dyn std::error::Error>> {
-    let params_hash = hex::encode(Sha256::digest(serde_json::to_string(params)?.as_bytes()));
+) -> Result<Verdict, A2gError> {
+    let params_hash = hex::encode(Sha256::digest(
+        serde_json::to_string(params)
+            .map_err(|e| A2gError::Json(e.to_string()))?
+            .as_bytes(),
+    ));
 
-    let m: Mandate = toml::from_str(mandate_str)?;
+    let m: Mandate =
+        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
 
     let agent_did = m.mandate.agent_did.clone();
     let agent_name = m.mandate.agent_name.clone();
@@ -629,12 +637,12 @@ pub fn enforce<L: EnforceLedger>(
     tool: &str,
     params: &serde_json::Value,
     ledger: &L,
-) -> Result<Verdict, Box<dyn std::error::Error>> {
+) -> Result<Verdict, A2gError> {
     let resolved_params = if let Some(raw_path) = params.get("path").and_then(|p| p.as_str()) {
         let resolved = resolve_path_for_enforce(raw_path)?;
         let mut p = params.clone();
         p.as_object_mut()
-            .ok_or("params is not a JSON object")?
+            .ok_or_else(|| A2gError::Internal("params is not a JSON object".to_string()))?
             .insert("path".to_string(), serde_json::Value::String(resolved));
         p
     } else {
@@ -657,48 +665,52 @@ pub fn enforce<L: EnforceLedger>(
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Validate jurisdiction operating_hours format (HH:MM-HH:MM)
-fn validate_operating_hours(
-    hours_str: &str,
-) -> Result<(u32, u32, u32, u32), Box<dyn std::error::Error>> {
+fn validate_operating_hours(hours_str: &str) -> Result<(u32, u32, u32, u32), A2gError> {
     let mut range = hours_str.splitn(2, '-');
     let start = range
         .next()
         .ok_or_else(|| {
-            format!(
+            A2gError::MandateInvalid(format!(
                 "invalid operating_hours format '{}': expected HH:MM-HH:MM",
                 hours_str
-            )
+            ))
         })?
         .trim();
     let end = range
         .next()
         .ok_or_else(|| {
-            format!(
+            A2gError::MandateInvalid(format!(
                 "invalid operating_hours format '{}': expected HH:MM-HH:MM",
                 hours_str
-            )
+            ))
         })?
         .trim();
 
-    let parse_time = |time_str: &str| -> Result<(u32, u32), Box<dyn std::error::Error>> {
+    let parse_time = |time_str: &str| -> Result<(u32, u32), A2gError> {
         let mut tp = time_str.splitn(2, ':');
-        let hour_str = tp
-            .next()
-            .ok_or_else(|| format!("invalid time '{}': expected HH:MM", time_str))?;
-        let min_str = tp
-            .next()
-            .ok_or_else(|| format!("invalid time '{}': expected HH:MM", time_str))?;
+        let hour_str = tp.next().ok_or_else(|| {
+            A2gError::MandateInvalid(format!("invalid time '{}': expected HH:MM", time_str))
+        })?;
+        let min_str = tp.next().ok_or_else(|| {
+            A2gError::MandateInvalid(format!("invalid time '{}': expected HH:MM", time_str))
+        })?;
         let hour: u32 = hour_str
             .parse()
-            .map_err(|_| format!("invalid hour in '{}'", time_str))?;
+            .map_err(|_| A2gError::MandateInvalid(format!("invalid hour in '{}'", time_str)))?;
         let minute: u32 = min_str
             .parse()
-            .map_err(|_| format!("invalid minute in '{}'", time_str))?;
+            .map_err(|_| A2gError::MandateInvalid(format!("invalid minute in '{}'", time_str)))?;
         if hour > 23 {
-            return Err(format!("hour {} exceeds 23 in '{}'", hour, time_str).into());
+            return Err(A2gError::MandateInvalid(format!(
+                "hour {} exceeds 23 in '{}'",
+                hour, time_str
+            )));
         }
         if minute > 59 {
-            return Err(format!("minute {} exceeds 59 in '{}'", minute, time_str).into());
+            return Err(A2gError::MandateInvalid(format!(
+                "minute {} exceeds 59 in '{}'",
+                minute, time_str
+            )));
         }
         Ok((hour, minute))
     };
@@ -710,11 +722,10 @@ fn validate_operating_hours(
     let start_total = sh.saturating_mul(60).saturating_add(sm);
     let end_total = eh.saturating_mul(60).saturating_add(em);
     if start_total >= end_total {
-        return Err(format!(
+        return Err(A2gError::MandateInvalid(format!(
             "operating_hours start '{}' must be before end '{}'",
             start, end
-        )
-        .into());
+        )));
     }
 
     Ok((sh, sm, eh, em))
@@ -759,7 +770,7 @@ fn canonicalize_path(raw: &str) -> String {
 }
 
 #[cfg(feature = "std")]
-fn resolve_path_for_enforce(raw: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn resolve_path_for_enforce(raw: &str) -> Result<String, A2gError> {
     if raw.is_empty() {
         return Ok(String::new());
     }
@@ -769,10 +780,10 @@ fn resolve_path_for_enforce(raw: &str) -> Result<String, Box<dyn std::error::Err
     }
     let path_obj = std::path::Path::new(&logical);
     let leaf = path_obj.file_name().ok_or_else(|| {
-        format!(
+        A2gError::PathError(format!(
             "path '{}' has no filename component; refusing to pass unresolved path to policy engine",
             logical
-        )
+        ))
     })?;
     let parent = match path_obj.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_owned(),
@@ -782,13 +793,12 @@ fn resolve_path_for_enforce(raw: &str) -> Result<String, Box<dyn std::error::Err
     std::fs::canonicalize(&parent)
         .map(|p| p.join(leaf).to_string_lossy().into_owned())
         .map_err(|_| {
-            format!(
+            A2gError::PathError(format!(
                 "path '{}' does not exist and parent '{}' cannot be resolved; \
                  refusing to pass unresolved path to policy engine",
                 logical,
                 parent.display()
-            )
-            .into()
+            ))
         })
 }
 
@@ -888,7 +898,7 @@ mod tests {
             &self,
             _agent_did: &str,
             _mandate_hash: &str,
-        ) -> Result<bool, Box<dyn std::error::Error>> {
+        ) -> Result<bool, crate::error::A2gError> {
             Ok(false)
         }
 
@@ -896,7 +906,7 @@ mod tests {
             &self,
             _agent_did: &str,
             _seconds: i64,
-        ) -> Result<u64, Box<dyn std::error::Error>> {
+        ) -> Result<u64, crate::error::A2gError> {
             Ok(0)
         }
     }

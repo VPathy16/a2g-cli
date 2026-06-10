@@ -36,6 +36,7 @@
 //! no heap allocation on the `Allow` path. `StateVerdict::Deny` carries a `&'static str`
 //! reason to avoid heap. `extract_vehicle_state()` uses `serde_json` (already a blocker).
 
+use crate::error::A2gError;
 use serde::{Deserialize, Serialize};
 
 /// The four capability domains for `vehicle.*` tools.
@@ -127,21 +128,23 @@ pub const SPEED_MAX_KPH: f64 = 1_000.0;
 ///
 /// The 5.0 km/h gate threshold (1388.888… mm/s) rounds to [`SPEED_GATE_MMPS`] = 1 389.
 /// Effective threshold precision: ± 1 mm/s (≈ 0.0036 km/h).
-pub fn speed_kph_to_mmps(speed_kph: f64) -> Result<u32, &'static str> {
+pub fn speed_kph_to_mmps(speed_kph: f64) -> Result<u32, A2gError> {
     if speed_kph.is_nan() {
-        return Err("speed_kph_to_mmps: speed is NaN");
+        return Err(A2gError::InvalidSpeed("speed is NaN".to_string()));
     }
     if speed_kph.is_infinite() {
-        return Err("speed_kph_to_mmps: speed is infinite");
+        return Err(A2gError::InvalidSpeed("speed is infinite".to_string()));
     }
     if speed_kph < 0.0 {
-        return Err("speed_kph_to_mmps: speed is negative");
+        return Err(A2gError::InvalidSpeed("speed is negative".to_string()));
     }
     if speed_kph.is_subnormal() {
-        return Err("speed_kph_to_mmps: speed is subnormal");
+        return Err(A2gError::InvalidSpeed("speed is subnormal".to_string()));
     }
     if speed_kph > SPEED_MAX_KPH {
-        return Err("speed_kph_to_mmps: speed exceeds SPEED_MAX_KPH");
+        return Err(A2gError::InvalidSpeed(
+            "speed exceeds SPEED_MAX_KPH".to_string(),
+        ));
     }
     // Validated range: [0.0, 1000.0] → [0, 277_778] mm/s — well within u32::MAX.
     let mmps_f = speed_kph * (1_000_000.0_f64 / 3_600.0_f64);
@@ -622,6 +625,9 @@ impl StateTrust {
 }
 
 /// Error conditions when verifying an [`AttestedVehicleState`].
+///
+/// Kept as a public type alias mapping to `A2gError` variants for
+/// backwards compatibility with code that pattern-matches on attestation errors.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttestationError {
     /// ed25519 signature did not verify against the declared attester public key.

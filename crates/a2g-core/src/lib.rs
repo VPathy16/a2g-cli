@@ -22,6 +22,7 @@
 pub mod authority;
 pub mod cbor;
 pub mod enforce;
+pub mod error;
 pub mod hitl;
 pub mod identity;
 pub mod ledger;
@@ -30,3 +31,5 @@ pub mod output_gov;
 pub mod proposal;
 pub mod receipt;
 pub mod vehicle;
+
+pub use error::A2gError;

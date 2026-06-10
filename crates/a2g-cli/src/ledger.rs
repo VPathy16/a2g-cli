@@ -7,6 +7,7 @@
 use a2g_core::enforce::Verdict;
 use a2g_core::ledger::EnforceLedger;
 use a2g_core::receipt::{self, Receipt};
+use a2g_core::A2gError;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
@@ -58,31 +59,29 @@ pub struct Ledger {
 }
 
 impl EnforceLedger for Ledger {
-    fn is_revoked(
-        &self,
-        agent_did: &str,
-        mandate_hash: &str,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM revocations WHERE agent_did = ?1 AND mandate_hash = ?2",
-            params![agent_did, mandate_hash],
-            |row| row.get(0),
-        )?;
+    fn is_revoked(&self, agent_did: &str, mandate_hash: &str) -> Result<bool, A2gError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM revocations WHERE agent_did = ?1 AND mandate_hash = ?2",
+                params![agent_did, mandate_hash],
+                |row| row.get(0),
+            )
+            .map_err(|e| A2gError::LedgerError(e.to_string()))?;
         Ok(count > 0)
     }
 
-    fn count_recent(
-        &self,
-        agent_did: &str,
-        seconds: i64,
-    ) -> Result<u64, Box<dyn std::error::Error>> {
+    fn count_recent(&self, agent_did: &str, seconds: i64) -> Result<u64, A2gError> {
         let cutoff = (Utc::now() - chrono::Duration::seconds(seconds)).to_rfc3339();
 
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM decisions WHERE agent_did = ?1 AND timestamp > ?2",
-            params![agent_did, cutoff],
-            |row| row.get(0),
-        )?;
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM decisions WHERE agent_did = ?1 AND timestamp > ?2",
+                params![agent_did, cutoff],
+                |row| row.get(0),
+            )
+            .map_err(|e| A2gError::LedgerError(e.to_string()))?;
 
         Ok(count as u64)
     }

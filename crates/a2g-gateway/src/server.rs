@@ -419,8 +419,9 @@ struct SignedBindingWire {
 }
 
 /// Canonical CBOR bytes signed by the gateway's binding key (ADR-0011).
-fn binding_bytes(b: &PendingApprovalBinding) -> Result<Vec<u8>, &'static str> {
-    let hash_bytes = hex::decode(&b.request_hash).map_err(|_| "invalid request_hash hex")?;
+fn binding_bytes(b: &PendingApprovalBinding) -> Result<Vec<u8>, a2g_core::A2gError> {
+    let hash_bytes =
+        hex::decode(&b.request_hash).map_err(|e| a2g_core::A2gError::HexDecode(e.to_string()))?;
     a2g_core::cbor::encode_canonical(&a2g_core::cbor::BindingPayload {
         tag: "BINDING".to_string(),
         binding_id: b.binding_id.clone(),

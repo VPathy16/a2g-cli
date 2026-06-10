@@ -5,6 +5,7 @@
 //! Receipts form an append-only chain via prev_hash.
 
 use crate::enforce::{Decision, Verdict};
+use crate::error::A2gError;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -186,7 +187,7 @@ pub fn verify_receipt(receipt: &Receipt) -> bool {
 }
 
 /// Verify a chain of receipts (each receipt's prev_hash matches the previous receipt_hash)
-pub fn verify_chain(receipts: &[Receipt]) -> Result<(), String> {
+pub fn verify_chain(receipts: &[Receipt]) -> Result<(), A2gError> {
     if receipts.is_empty() {
         return Ok(());
     }
@@ -194,13 +195,18 @@ pub fn verify_chain(receipts: &[Receipt]) -> Result<(), String> {
     // Verify first receipt points to genesis
     let genesis = "0".repeat(64);
     if receipts.first().map(|r| r.prev_hash.as_str()) != Some(genesis.as_str()) {
-        return Err("first receipt does not point to genesis hash".to_string());
+        return Err(A2gError::Internal(
+            "first receipt does not point to genesis hash".to_string(),
+        ));
     }
 
     // Verify each receipt's own hash
     for (i, r) in receipts.iter().enumerate() {
         if !verify_receipt(r) {
-            return Err(format!("receipt {} has invalid hash", i));
+            return Err(A2gError::Internal(format!(
+                "receipt {} has invalid hash",
+                i
+            )));
         }
     }
 
@@ -208,10 +214,10 @@ pub fn verify_chain(receipts: &[Receipt]) -> Result<(), String> {
     for (i, window) in receipts.windows(2).enumerate() {
         if let [prev, curr] = window {
             if curr.prev_hash != prev.receipt_hash {
-                return Err(format!(
+                return Err(A2gError::Internal(format!(
                     "chain broken at receipt {}: prev_hash does not match previous receipt_hash",
                     i.saturating_add(1)
-                ));
+                )));
             }
         }
     }

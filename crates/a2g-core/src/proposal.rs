@@ -11,6 +11,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::error::A2gError;
+
 /// Status of a mandate proposal
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ProposalStatus {
@@ -139,8 +141,9 @@ impl std::fmt::Display for ReviewDecision {
 }
 
 /// Assess risk level from a mandate TOML string
-pub fn assess_risk(mandate_str: &str) -> Result<RiskLevel, Box<dyn std::error::Error>> {
-    let m: crate::mandate::Mandate = toml::from_str(mandate_str)?;
+pub fn assess_risk(mandate_str: &str) -> Result<RiskLevel, A2gError> {
+    let m: crate::mandate::Mandate =
+        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
     let mut score: u32 = 0;
 
     // Tool risk scoring
@@ -207,7 +210,7 @@ pub fn create_proposal(
     mandate_body: &str,
     justification: &str,
     proposal_ttl_hours: u64,
-) -> Result<Proposal, Box<dyn std::error::Error>> {
+) -> Result<Proposal, A2gError> {
     let risk_level = assess_risk(mandate_body)?;
     let required_approvals = risk_level.required_approvals();
 
@@ -255,25 +258,32 @@ pub fn review_proposal(
     reviewer_name: &str,
     decision: ReviewDecision,
     reason: &str,
-) -> Result<Review, Box<dyn std::error::Error>> {
+) -> Result<Review, A2gError> {
     // Check proposal is still pending
     if proposal.status != ProposalStatus::Pending {
-        return Err(format!("proposal is not pending (status: {})", proposal.status).into());
+        return Err(A2gError::MandateInvalid(format!(
+            "proposal is not pending (status: {})",
+            proposal.status
+        )));
     }
 
     // Check proposal hasn't expired
     let expires = proposal
         .expires_at
         .parse::<chrono::DateTime<Utc>>()
-        .map_err(|_| "invalid proposal expires_at")?;
+        .map_err(|_| A2gError::MandateInvalid("invalid proposal expires_at".to_string()))?;
     if Utc::now() >= expires {
         proposal.status = ProposalStatus::Expired;
-        return Err("proposal has expired".into());
+        return Err(A2gError::MandateExpired);
     }
 
     // Derive reviewer identity
-    let secret_bytes = hex::decode(reviewer_secret_hex)?;
-    let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into()?;
+    let secret_bytes =
+        hex::decode(reviewer_secret_hex).map_err(|e| A2gError::HexDecode(e.to_string()))?;
+    let secret_arr: [u8; 32] = secret_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| A2gError::InvalidKey)?;
     let signing_key = SigningKey::from_bytes(&secret_arr);
     let verifying_key = signing_key.verifying_key();
     let pubkey_hex = hex::encode(verifying_key.to_bytes());
@@ -288,7 +298,9 @@ pub fn review_proposal(
         .iter()
         .any(|r| r.reviewer_did == reviewer_did)
     {
-        return Err("reviewer has already submitted a review".into());
+        return Err(A2gError::MandateInvalid(
+            "reviewer has already submitted a review".to_string(),
+        ));
     }
 
     let now = Utc::now();
@@ -357,22 +369,21 @@ pub fn review_proposal(
 }
 
 /// Verify a review's signature
-pub fn verify_review(
-    review: &Review,
-    proposal_hash: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let pubkey_bytes = hex::decode(&review.reviewer_pubkey)?;
+pub fn verify_review(review: &Review, proposal_hash: &str) -> Result<(), A2gError> {
+    let pubkey_bytes =
+        hex::decode(&review.reviewer_pubkey).map_err(|e| A2gError::HexDecode(e.to_string()))?;
     let pubkey_arr: [u8; 32] = pubkey_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| "invalid reviewer public key")?;
-    let verifying_key = VerifyingKey::from_bytes(&pubkey_arr)?;
+        .map_err(|_| A2gError::InvalidKey)?;
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| A2gError::InvalidKey)?;
 
-    let sig_bytes = hex::decode(&review.signature)?;
+    let sig_bytes =
+        hex::decode(&review.signature).map_err(|e| A2gError::HexDecode(e.to_string()))?;
     let sig_arr: [u8; 64] = sig_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| "invalid review signature")?;
+        .map_err(|_| A2gError::SignatureInvalid)?;
     let signature = Signature::from_bytes(&sig_arr);
 
     let review_data = format!(
@@ -387,7 +398,9 @@ pub fn verify_review(
     );
     let review_payload = format!("REVIEW:{}", review_data);
 
-    verifying_key.verify(review_payload.as_bytes(), &signature)?;
+    verifying_key
+        .verify(review_payload.as_bytes(), &signature)
+        .map_err(|_| A2gError::SignatureInvalid)?;
     Ok(())
 }
 

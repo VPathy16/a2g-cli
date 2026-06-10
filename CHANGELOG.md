@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Breaking
 
+- **Unified error type `A2gError` replaces `Box<dyn std::error::Error>` across a2g-core public API (ADR-0012)**
+  — `a2g-core` no longer requires `std::error::Error` on the decision path (no_std Blocker #1 resolved).
+  - `ApprovalGrantError` enum **removed** from `hitl.rs`. Variants map to `A2gError::BindingMismatch`, `A2gError::GrantExpired`, `A2gError::InvalidKey`, `A2gError::SignatureInvalid`.
+  - `AttestationError` enum **removed** from `vehicle.rs`. Variants map to `A2gError::AttestationBadSignature`, `AttestationInvalidKey`, `AttestationStaleNonce`, `AttestationStale`.
+  - All fallible public functions in `mandate.rs`, `authority.rs`, `identity.rs`, `proposal.rs`, `receipt.rs`, `enforce.rs`, `ledger.rs`, `hitl.rs`, `vehicle.rs`, `cbor.rs` now return `Result<_, A2gError>`.
+  - External `EnforceLedger` implementations must update their return type to `A2gError`; the migration path is `.map_err(|e| A2gError::LedgerError(e.to_string()))`.
+  - `std::error::Error` impl is gated behind `#[cfg(feature = "std")]`.
+  - No verdict semantics, CBOR wire formats, or signing behavior changes.
+
 - **Wire-format change: colon-delimited signed payloads replaced with canonical CBOR (ADR-0011)**
   — affects `GatewayReceipt` (signed), `PendingApprovalBinding` MAC (gateway + FFI),
   and `ApprovalGrant` signing. Old colon-delimited receipts, bindings, and grants will **not**

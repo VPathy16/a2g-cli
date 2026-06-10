@@ -8,6 +8,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::error::A2gError;
+
 /// Information extracted from a verified mandate
 pub struct MandateInfo {
     pub agent_did: String,
@@ -273,9 +275,10 @@ pub fn sign_mandate(
     mandate_str: &str,
     sovereign_secret_hex: &str,
     ttl_hours: u64,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, A2gError> {
     // Parse to validate structure
-    let mut mandate: Mandate = toml::from_str(mandate_str)?;
+    let mut mandate: Mandate =
+        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
 
     // Set timestamps
     let now = Utc::now();
@@ -287,8 +290,12 @@ pub fn sign_mandate(
     mandate.mandate.expires_at = expires.to_rfc3339();
 
     // Derive issuer DID from sovereign key
-    let secret_bytes = hex::decode(sovereign_secret_hex)?;
-    let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into()?;
+    let secret_bytes =
+        hex::decode(sovereign_secret_hex).map_err(|e| A2gError::HexDecode(e.to_string()))?;
+    let secret_arr: [u8; 32] = secret_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| A2gError::InvalidKey)?;
     let signing_key = SigningKey::from_bytes(&secret_arr);
     let verifying_key = signing_key.verifying_key();
     let issuer_pubkey_hex = hex::encode(verifying_key.to_bytes());
@@ -311,7 +318,7 @@ pub fn sign_mandate(
 
     // Remove old signature before serializing the TOML body
     mandate.signature = None;
-    let body_str = toml::to_string_pretty(&mandate)?;
+    let body_str = toml::to_string_pretty(&mandate).map_err(|e| A2gError::Json(e.to_string()))?;
 
     // Build final TOML with signature section
     let signed_toml = format!(
@@ -326,15 +333,22 @@ pub fn sign_mandate(
 }
 
 /// Verify a signed mandate — checks signature, TTL, and structural validity
-pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, Box<dyn std::error::Error>> {
-    let mandate: Mandate = toml::from_str(mandate_str)?;
+pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, A2gError> {
+    let mandate: Mandate =
+        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
 
     // 1. Check signature exists
-    let sig = mandate.signature.as_ref().ok_or("mandate is unsigned")?;
+    let sig = mandate
+        .signature
+        .as_ref()
+        .ok_or_else(|| A2gError::MandateInvalid("mandate is unsigned".to_string()))?;
 
     // 2. Verify signature algorithm
     if sig.algorithm != "ed25519" {
-        return Err(format!("unsupported algorithm: {}", sig.algorithm).into());
+        return Err(A2gError::MandateInvalid(format!(
+            "unsupported algorithm: {}",
+            sig.algorithm
+        )));
     }
 
     // 3. Reconstruct canonical signing payload for verification (SPEC §4.5)
@@ -342,7 +356,7 @@ pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, Box<dyn std::err
     let sig_clone = verify_mandate
         .signature
         .take()
-        .ok_or("mandate signature unexpectedly absent")?;
+        .ok_or_else(|| A2gError::Internal("mandate signature unexpectedly absent".to_string()))?;
     let payload = mandate_signing_payload(
         &verify_mandate.mandate.agent_did,
         &verify_mandate.mandate.issuer,
@@ -352,35 +366,38 @@ pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, Box<dyn std::err
     let body_hash = Sha256::digest(payload.as_bytes());
 
     // 4. Verify ed25519 signature
-    let pubkey_bytes = hex::decode(&sig_clone.issuer_pubkey)?;
+    let pubkey_bytes =
+        hex::decode(&sig_clone.issuer_pubkey).map_err(|e| A2gError::HexDecode(e.to_string()))?;
     let pubkey_arr: [u8; 32] = pubkey_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| "invalid public key length")?;
-    let verifying_key = VerifyingKey::from_bytes(&pubkey_arr)?;
+        .map_err(|_| A2gError::InvalidKey)?;
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| A2gError::InvalidKey)?;
 
-    let sig_bytes = hex::decode(&sig_clone.signature)?;
+    let sig_bytes =
+        hex::decode(&sig_clone.signature).map_err(|e| A2gError::HexDecode(e.to_string()))?;
     let sig_arr: [u8; 64] = sig_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| "invalid signature length")?;
+        .map_err(|_| A2gError::SignatureInvalid)?;
     let signature = Signature::from_bytes(&sig_arr);
 
-    verifying_key.verify(&body_hash, &signature)?;
+    verifying_key
+        .verify(&body_hash, &signature)
+        .map_err(|_| A2gError::SignatureInvalid)?;
 
     // 5. Check TTL
     let expires_at = verify_mandate
         .mandate
         .expires_at
         .parse::<DateTime<Utc>>()
-        .map_err(|_| "invalid expires_at timestamp")?;
+        .map_err(|_| A2gError::MandateInvalid("invalid expires_at timestamp".to_string()))?;
 
     let now = Utc::now();
     let ttl_remaining = expires_at.signed_duration_since(now).num_seconds();
 
     if ttl_remaining <= 0 {
-        let ago = ttl_remaining.saturating_neg();
-        return Err(format!("mandate expired at {} ({} seconds ago)", expires_at, ago).into());
+        return Err(A2gError::MandateExpired);
     }
 
     // 6. Return info
@@ -398,17 +415,24 @@ pub fn verify_mandate(mandate_str: &str) -> Result<MandateInfo, Box<dyn std::err
 ///
 /// Used by `decide()` so that the TTL check can be performed with an
 /// injected clock rather than `Utc::now()` called inside here.
-pub fn verify_signature(mandate_str: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mandate: Mandate = toml::from_str(mandate_str)?;
-    let sig = mandate.signature.as_ref().ok_or("mandate is unsigned")?;
+pub fn verify_signature(mandate_str: &str) -> Result<(), A2gError> {
+    let mandate: Mandate =
+        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
+    let sig = mandate
+        .signature
+        .as_ref()
+        .ok_or_else(|| A2gError::MandateInvalid("mandate is unsigned".to_string()))?;
     if sig.algorithm != "ed25519" {
-        return Err(format!("unsupported algorithm: {}", sig.algorithm).into());
+        return Err(A2gError::MandateInvalid(format!(
+            "unsupported algorithm: {}",
+            sig.algorithm
+        )));
     }
     let mut m = mandate;
     let sig_clone = m
         .signature
         .take()
-        .ok_or("mandate signature unexpectedly absent")?;
+        .ok_or_else(|| A2gError::Internal("mandate signature unexpectedly absent".to_string()))?;
     let payload = mandate_signing_payload(
         &m.mandate.agent_did,
         &m.mandate.issuer,
@@ -416,25 +440,30 @@ pub fn verify_signature(mandate_str: &str) -> Result<(), Box<dyn std::error::Err
         &m.capabilities.tools,
     );
     let body_hash = Sha256::digest(payload.as_bytes());
-    let pubkey_bytes = hex::decode(&sig_clone.issuer_pubkey)?;
+    let pubkey_bytes =
+        hex::decode(&sig_clone.issuer_pubkey).map_err(|e| A2gError::HexDecode(e.to_string()))?;
     let pubkey_arr: [u8; 32] = pubkey_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| "invalid public key length")?;
-    let verifying_key = VerifyingKey::from_bytes(&pubkey_arr)?;
-    let sig_bytes = hex::decode(&sig_clone.signature)?;
+        .map_err(|_| A2gError::InvalidKey)?;
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| A2gError::InvalidKey)?;
+    let sig_bytes =
+        hex::decode(&sig_clone.signature).map_err(|e| A2gError::HexDecode(e.to_string()))?;
     let sig_arr: [u8; 64] = sig_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| "invalid signature length")?;
+        .map_err(|_| A2gError::SignatureInvalid)?;
     let signature = Signature::from_bytes(&sig_arr);
-    verifying_key.verify(&body_hash, &signature)?;
+    verifying_key
+        .verify(&body_hash, &signature)
+        .map_err(|_| A2gError::SignatureInvalid)?;
     Ok(())
 }
 
 /// Parse a mandate from TOML string
-pub fn parse_mandate(mandate_str: &str) -> Result<Mandate, Box<dyn std::error::Error>> {
-    let mandate: Mandate = toml::from_str(mandate_str)?;
+pub fn parse_mandate(mandate_str: &str) -> Result<Mandate, A2gError> {
+    let mandate: Mandate =
+        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
     Ok(mandate)
 }
 

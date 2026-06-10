@@ -9,13 +9,12 @@ The feature flag `default = ["std"]` is in place. Disabling it (`--no-default-fe
 
 ## Blockers
 
-### 1. `Box<dyn std::error::Error>`
+### ~~1. `Box<dyn std::error::Error>`~~ — **RESOLVED (ADR-0012)**
 
 | | |
 |--|--|
-| **Location** | Return type of `decide()`, `enforce()`, and virtually every fallible function in the crate |
-| **Reason** | `std::error::Error` is a std trait; `Box<dyn Trait>` requires the global allocator (`alloc`) and `std::error::Error` |
-| **Candidate replacement** | Define a crate-local `A2gError` enum; implement `core::fmt::Display`. Eliminates the `std::error::Error` bound. Requires changing every function signature. |
+| **Location** | ~~Return type of `decide()`, `enforce()`, and virtually every fallible function in the crate~~ |
+| **Resolution** | `A2gError` enum added in `crates/a2g-core/src/error.rs`. All public API functions in a2g-core now return `Result<_, A2gError>`. `core::fmt::Display` is the only bound; `std::error::Error` is gated behind `#[cfg(feature = "std")]`. `ApprovalGrantError` and `AttestationError` ad-hoc enums removed. See ADR-0012. |
 
 ### 2. `toml` crate
 
@@ -86,7 +85,7 @@ The feature flag `default = ["std"]` is in place. Disabling it (`--no-default-fe
 
 | Blocker | Severity | Scope | Effort to Fix |
 |---------|----------|-------|---------------|
-| `Box<dyn std::error::Error>` | **High** | Entire public API | Large — new error type, ripple across all functions |
+| ~~`Box<dyn std::error::Error>`~~ | ~~**High**~~ | ~~Entire public API~~ | **RESOLVED — ADR-0012** |
 | `toml` crate | **High** | Mandate parsing | Large — format change or new library |
 | `regex` crate | **Medium** | Output governance only | Medium — hand-rolled or `aho-corasick` |
 | `uuid` OsRng | **Medium** | `decide()` correlation ID | Small — make it a parameter |
@@ -96,8 +95,9 @@ The feature flag `default = ["std"]` is in place. Disabling it (`--no-default-fe
 | `ed25519-dalek` (rand_core) | **Low** | Key gen only | Small — split gen vs verify |
 
 The path of least resistance for a partial no_std build:
-1. Resolve blockers 4, 6, 7, 8 (small effort).
-2. Gate `enforce()` under `#[cfg(feature = "std")]`.
-3. Move receipt chaining to the CLI (blocker 5).
-4. Replace `regex` with `aho-corasick` (blocker 3).
-5. Blockers 1 and 2 require significant API redesign and are out of scope until the protocol stabilises.
+1. ~~Blocker 1 resolved (ADR-0012).~~
+2. Resolve blockers 4, 6, 7, 8 (small effort).
+3. Gate `enforce()` under `#[cfg(feature = "std")]`.
+4. Move receipt chaining to the CLI (blocker 5).
+5. Replace `regex` with `aho-corasick` (blocker 3).
+6. Blocker 2 (`toml`) requires a format change and is out of scope until the protocol stabilises.
