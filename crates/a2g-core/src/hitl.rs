@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::cbor::{encode_canonical, GrantPayload};
+use crate::error::A2gError;
 
 /// Default pending-approval TTL: 5 minutes.
 pub const PENDING_APPROVAL_TTL_MINUTES: i64 = 5;
@@ -86,35 +87,6 @@ pub struct ApprovalGrant {
     pub parent_receipt_hash: String,
 }
 
-/// Failure modes when validating an [`ApprovalGrant`] against a [`PendingApprovalBinding`].
-#[derive(Debug, PartialEq, Eq)]
-pub enum ApprovalGrantError {
-    /// `binding_id` or `request_hash` did not match the pending binding.
-    BindingMismatch { field: &'static str },
-    /// Grant or pending binding TTL has elapsed.
-    Expired,
-    /// ed25519 signature did not verify.
-    InvalidSignature,
-    /// `approver_pubkey` could not be decoded as a valid ed25519 key.
-    InvalidPubkey,
-    /// CBOR payload encoding failed (malformed `request_hash` hex or internal error).
-    EncodingError,
-}
-
-impl std::fmt::Display for ApprovalGrantError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ApprovalGrantError::BindingMismatch { field } => {
-                write!(f, "{} mismatch", field)
-            }
-            ApprovalGrantError::Expired => write!(f, "expired"),
-            ApprovalGrantError::InvalidSignature => write!(f, "invalid signature"),
-            ApprovalGrantError::InvalidPubkey => write!(f, "invalid approver pubkey"),
-            ApprovalGrantError::EncodingError => write!(f, "cbor encoding error"),
-        }
-    }
-}
-
 /// Compute the `request_hash` that binds an approval to a specific action.
 ///
 /// Payload: `"REQUEST:<mandate_hash>:<tool>:<params_hash>:<timestamp>"`.
@@ -145,7 +117,7 @@ impl ApprovalGrant {
         ttl_seconds: u64,
         now: DateTime<Utc>,
         parent_receipt_hash: &str,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self, A2gError> {
         let ttl_secs = i64::try_from(ttl_seconds).unwrap_or(i64::MAX);
         let expires_at = now
             .checked_add_signed(Duration::seconds(ttl_secs))
@@ -176,43 +148,40 @@ impl ApprovalGrant {
         &self,
         pending: &PendingApprovalBinding,
         now: DateTime<Utc>,
-    ) -> Result<(), ApprovalGrantError> {
+    ) -> Result<(), A2gError> {
         if self.binding_id != pending.binding_id {
-            return Err(ApprovalGrantError::BindingMismatch {
+            return Err(A2gError::BindingMismatch {
                 field: "binding_id",
             });
         }
         if self.request_hash != pending.request_hash {
-            return Err(ApprovalGrantError::BindingMismatch {
+            return Err(A2gError::BindingMismatch {
                 field: "request_hash",
             });
         }
         let expires = self
             .expires_at
             .parse::<DateTime<Utc>>()
-            .map_err(|_| ApprovalGrantError::Expired)?;
+            .map_err(|_| A2gError::GrantExpired)?;
         if now >= expires {
-            return Err(ApprovalGrantError::Expired);
+            return Err(A2gError::GrantExpired);
         }
         let pubkey_bytes =
-            hex::decode(&self.approver_pubkey).map_err(|_| ApprovalGrantError::InvalidPubkey)?;
-        let pubkey_arr: [u8; 32] = pubkey_bytes
-            .try_into()
-            .map_err(|_| ApprovalGrantError::InvalidPubkey)?;
+            hex::decode(&self.approver_pubkey).map_err(|e| A2gError::HexDecode(e.to_string()))?;
+        let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| A2gError::InvalidKey)?;
         let verifying_key =
-            VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| ApprovalGrantError::InvalidPubkey)?;
+            VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| A2gError::InvalidKey)?;
         let sig_bytes =
-            hex::decode(&self.signature).map_err(|_| ApprovalGrantError::InvalidSignature)?;
+            hex::decode(&self.signature).map_err(|e| A2gError::HexDecode(e.to_string()))?;
         let sig_arr: [u8; 64] = sig_bytes
             .try_into()
-            .map_err(|_| ApprovalGrantError::InvalidSignature)?;
+            .map_err(|_| A2gError::SignatureInvalid)?;
         let sig = Signature::from_bytes(&sig_arr);
         let payload_bytes =
-            Self::payload_bytes(&self.binding_id, &self.request_hash, &self.expires_at)
-                .map_err(|_| ApprovalGrantError::EncodingError)?;
+            Self::payload_bytes(&self.binding_id, &self.request_hash, &self.expires_at)?;
         verifying_key
             .verify(&payload_bytes, &sig)
-            .map_err(|_| ApprovalGrantError::InvalidSignature)?;
+            .map_err(|_| A2gError::SignatureInvalid)?;
         Ok(())
     }
 
@@ -220,8 +189,9 @@ impl ApprovalGrant {
         binding_id: &str,
         request_hash: &str,
         expires_at: &str,
-    ) -> Result<Vec<u8>, &'static str> {
-        let hash_bytes = hex::decode(request_hash).map_err(|_| "invalid request_hash hex")?;
+    ) -> Result<Vec<u8>, A2gError> {
+        let hash_bytes =
+            hex::decode(request_hash).map_err(|e| A2gError::HexDecode(e.to_string()))?;
         let payload = GrantPayload {
             tag: "APPROVAL".to_string(),
             binding_id: binding_id.to_string(),

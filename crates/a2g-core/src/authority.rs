@@ -12,6 +12,8 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::error::A2gError;
+
 /// Authority level in the governance hierarchy
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
 pub enum AuthorityLevel {
@@ -119,9 +121,13 @@ pub fn create_root_delegation(
     scope: AuthorityScope,
     jurisdiction: Jurisdiction,
     ttl_hours: u64,
-) -> Result<Delegation, Box<dyn std::error::Error>> {
-    let secret_bytes = hex::decode(root_secret_hex)?;
-    let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into()?;
+) -> Result<Delegation, A2gError> {
+    let secret_bytes =
+        hex::decode(root_secret_hex).map_err(|e| A2gError::HexDecode(e.to_string()))?;
+    let secret_arr: [u8; 32] = secret_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| A2gError::InvalidKey)?;
     let signing_key = SigningKey::from_bytes(&secret_arr);
     let verifying_key = signing_key.verifying_key();
     let pubkey_hex = hex::encode(verifying_key.to_bytes());
@@ -186,16 +192,15 @@ pub fn delegate(
     scope: AuthorityScope,
     jurisdiction: Jurisdiction,
     ttl_hours: u64,
-) -> Result<Delegation, Box<dyn std::error::Error>> {
+) -> Result<Delegation, A2gError> {
     // Verify the grantor's level allows this delegation
     // Hierarchy: Root(0) > Department(1) > Team(2) > Operator(3)
     // A higher numeric value means lower authority, so child level must be > parent level
     if level <= parent_delegation.level {
-        return Err(format!(
+        return Err(A2gError::AuthorityChain(format!(
             "cannot delegate {} authority from {} level",
             level, parent_delegation.level
-        )
-        .into());
+        )));
     }
 
     // Verify scope is a subset of parent's scope
@@ -205,20 +210,23 @@ pub fn delegate(
     let parent_expires = parent_delegation
         .expires_at
         .parse::<DateTime<Utc>>()
-        .map_err(|_| "invalid parent expires_at")?;
+        .map_err(|_| A2gError::MandateInvalid("invalid parent expires_at".to_string()))?;
     let now = Utc::now();
     let parent_remaining_hours = parent_expires.signed_duration_since(now).num_hours();
     let ttl_hours_i64 = i64::try_from(ttl_hours).unwrap_or(i64::MAX);
     if ttl_hours_i64 > parent_remaining_hours {
-        return Err(format!(
+        return Err(A2gError::AuthorityChain(format!(
             "requested TTL ({} hours) exceeds parent's remaining TTL ({} hours)",
             ttl_hours, parent_remaining_hours
-        )
-        .into());
+        )));
     }
 
-    let secret_bytes = hex::decode(grantor_secret_hex)?;
-    let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into()?;
+    let secret_bytes =
+        hex::decode(grantor_secret_hex).map_err(|e| A2gError::HexDecode(e.to_string()))?;
+    let secret_arr: [u8; 32] = secret_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| A2gError::InvalidKey)?;
     let signing_key = SigningKey::from_bytes(&secret_arr);
     let verifying_key = signing_key.verifying_key();
     let pubkey_hex = hex::encode(verifying_key.to_bytes());
@@ -229,11 +237,10 @@ pub fn delegate(
         bs58::encode(verifying_key.to_bytes()).into_string()
     );
     if grantor_did_from_key != parent_delegation.grantee_did {
-        return Err(format!(
+        return Err(A2gError::AuthorityChain(format!(
             "key-DID mismatch: signing key derives to '{}' but parent grantee is '{}'",
             grantor_did_from_key, parent_delegation.grantee_did
-        )
-        .into());
+        )));
     }
 
     let expires = now
@@ -276,23 +283,27 @@ pub fn delegate(
 }
 
 /// Verify a single delegation's signature and TTL
-pub fn verify_delegation(delegation: &Delegation) -> Result<(), Box<dyn std::error::Error>> {
+pub fn verify_delegation(delegation: &Delegation) -> Result<(), A2gError> {
     // Verify signature
-    let pubkey_bytes = hex::decode(&delegation.grantor_pubkey)?;
+    let pubkey_bytes =
+        hex::decode(&delegation.grantor_pubkey).map_err(|e| A2gError::HexDecode(e.to_string()))?;
     let pubkey_arr: [u8; 32] = pubkey_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| "invalid public key length")?;
-    let verifying_key = VerifyingKey::from_bytes(&pubkey_arr)?;
+        .map_err(|_| A2gError::InvalidKey)?;
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| A2gError::InvalidKey)?;
 
-    let sig_bytes = hex::decode(&delegation.signature)?;
+    let sig_bytes =
+        hex::decode(&delegation.signature).map_err(|e| A2gError::HexDecode(e.to_string()))?;
     let sig_arr: [u8; 64] = sig_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| "invalid signature length")?;
+        .map_err(|_| A2gError::SignatureInvalid)?;
     let signature = Signature::from_bytes(&sig_arr);
 
-    verifying_key.verify(delegation.delegation_hash.as_bytes(), &signature)?;
+    verifying_key
+        .verify(delegation.delegation_hash.as_bytes(), &signature)
+        .map_err(|_| A2gError::SignatureInvalid)?;
 
     // Note: delegation_hash was already computed with "DELEGATION:" domain prefix during creation,
     // so verification uses the hash directly
@@ -301,30 +312,40 @@ pub fn verify_delegation(delegation: &Delegation) -> Result<(), Box<dyn std::err
     let expires = delegation
         .expires_at
         .parse::<DateTime<Utc>>()
-        .map_err(|_| "invalid expires_at")?;
+        .map_err(|_| A2gError::AuthorityChain("invalid delegation expires_at".to_string()))?;
     if Utc::now() >= expires {
-        return Err("delegation expired".into());
+        return Err(A2gError::AuthorityChain("delegation expired".to_string()));
     }
 
     Ok(())
 }
 
 /// Verify a complete delegation chain from leaf to root
-pub fn verify_chain(chain: &[Delegation]) -> Result<ChainValidation, Box<dyn std::error::Error>> {
+pub fn verify_chain(chain: &[Delegation]) -> Result<ChainValidation, A2gError> {
     if chain.is_empty() {
-        return Err("empty delegation chain".into());
+        return Err(A2gError::AuthorityChain(
+            "empty delegation chain".to_string(),
+        ));
     }
 
     // First entry must be root (self-delegation)
-    let root = chain.first().ok_or("empty delegation chain")?;
+    let root = chain
+        .first()
+        .ok_or_else(|| A2gError::AuthorityChain("empty delegation chain".to_string()))?;
     if root.grantor_did != root.grantee_did {
-        return Err("chain root is not a self-delegation".into());
+        return Err(A2gError::AuthorityChain(
+            "chain root is not a self-delegation".to_string(),
+        ));
     }
     if root.level != AuthorityLevel::Root {
-        return Err("chain root is not ROOT level".into());
+        return Err(A2gError::AuthorityChain(
+            "chain root is not ROOT level".to_string(),
+        ));
     }
     if root.parent_delegation_hash != "0".repeat(64) {
-        return Err("chain root does not point to genesis".into());
+        return Err(A2gError::AuthorityChain(
+            "chain root does not point to genesis".to_string(),
+        ));
     }
 
     // Verify each delegation
@@ -336,25 +357,24 @@ pub fn verify_chain(chain: &[Delegation]) -> Result<ChainValidation, Box<dyn std
             // Get previous element safely (i > 0 guarantees i.saturating_sub(1) == i - 1)
             if let Some(prev) = chain.get(i.saturating_sub(1)) {
                 if d.parent_delegation_hash != prev.delegation_hash {
-                    return Err(
-                        format!("chain broken at delegation {}: parent_hash mismatch", i).into(),
-                    );
+                    return Err(A2gError::AuthorityChain(format!(
+                        "chain broken at delegation {}: parent_hash mismatch",
+                        i
+                    )));
                 }
                 // Verify grantor matches previous grantee
                 if d.grantor_did != prev.grantee_did {
-                    return Err(format!(
+                    return Err(A2gError::AuthorityChain(format!(
                         "chain broken at delegation {}: grantor is not previous grantee",
                         i
-                    )
-                    .into());
+                    )));
                 }
                 // Verify authority level decreases (numeric value increases: Root(0) < Dept(1) < Team(2) < Op(3))
                 if d.level <= prev.level {
-                    return Err(format!(
+                    return Err(A2gError::AuthorityChain(format!(
                         "chain broken at delegation {}: level does not decrease",
                         i
-                    )
-                    .into());
+                    )));
                 }
             }
         }
@@ -362,9 +382,9 @@ pub fn verify_chain(chain: &[Delegation]) -> Result<ChainValidation, Box<dyn std
 
     // Compute effective scope (intersection of all scopes in chain)
     let effective_scope = compute_effective_scope(chain);
-    let leaf = chain
-        .last()
-        .ok_or("empty delegation chain after validation")?;
+    let leaf = chain.last().ok_or_else(|| {
+        A2gError::AuthorityChain("empty delegation chain after validation".to_string())
+    })?;
 
     Ok(ChainValidation {
         valid: true,
@@ -380,19 +400,19 @@ pub fn verify_chain(chain: &[Delegation]) -> Result<ChainValidation, Box<dyn std
 pub fn validate_mandate_against_authority(
     mandate_str: &str,
     delegation: &Delegation,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let m: crate::mandate::Mandate = toml::from_str(mandate_str)?;
+) -> Result<(), A2gError> {
+    let m: crate::mandate::Mandate =
+        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
 
     // Check tools are within scope
     for tool in &m.capabilities.tools {
         if !delegation.scope.allowed_tools.is_empty()
             && !delegation.scope.allowed_tools.contains(tool)
         {
-            return Err(format!(
+            return Err(A2gError::AuthorityChain(format!(
                 "authority scope violation: tool '{}' not in authority's allowed_tools",
                 tool
-            )
-            .into());
+            )));
         }
     }
 
@@ -400,11 +420,10 @@ pub fn validate_mandate_against_authority(
     if delegation.scope.max_rate_limit > 0
         && m.limits.max_calls_per_minute > delegation.scope.max_rate_limit
     {
-        return Err(format!(
+        return Err(A2gError::AuthorityChain(format!(
             "authority scope violation: rate limit {} exceeds authority max {}",
             m.limits.max_calls_per_minute, delegation.scope.max_rate_limit
-        )
-        .into());
+        )));
     }
 
     // Check jurisdiction context
@@ -414,7 +433,7 @@ pub fn validate_mandate_against_authority(
 }
 
 /// Check if current context matches jurisdiction constraints
-pub fn check_jurisdiction(jurisdiction: &Jurisdiction) -> Result<(), Box<dyn std::error::Error>> {
+pub fn check_jurisdiction(jurisdiction: &Jurisdiction) -> Result<(), A2gError> {
     // Check operating hours if specified
     if !jurisdiction.operating_hours.is_empty() {
         let now = Utc::now();
@@ -425,11 +444,10 @@ pub fn check_jurisdiction(jurisdiction: &Jurisdiction) -> Result<(), Box<dyn std
             let start = start.trim();
             let end = end.trim();
             if hour_min.as_str() < start || hour_min.as_str() > end {
-                return Err(format!(
+                return Err(A2gError::MandateInvalid(format!(
                     "jurisdiction violation: current time {} is outside operating hours {}",
                     hour_min, jurisdiction.operating_hours
-                )
-                .into());
+                )));
             }
         }
     }
@@ -480,39 +498,33 @@ fn compute_effective_scope(chain: &[Delegation]) -> AuthorityScope {
 }
 
 /// Validate that a requested scope is a subset of the parent scope
-fn validate_scope_subset(
-    child: &AuthorityScope,
-    parent: &AuthorityScope,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_scope_subset(child: &AuthorityScope, parent: &AuthorityScope) -> Result<(), A2gError> {
     // If parent has tool restrictions, child must be a subset
     if !parent.allowed_tools.is_empty() {
         for tool in &child.allowed_tools {
             if !parent.allowed_tools.contains(tool) {
-                return Err(format!(
+                return Err(A2gError::AuthorityChain(format!(
                     "scope violation: tool '{}' not in parent's allowed_tools",
                     tool
-                )
-                .into());
+                )));
             }
         }
     }
 
     // Child TTL cannot exceed parent TTL
     if parent.max_ttl_hours > 0 && child.max_ttl_hours > parent.max_ttl_hours {
-        return Err(format!(
+        return Err(A2gError::AuthorityChain(format!(
             "scope violation: max_ttl_hours {} exceeds parent's {}",
             child.max_ttl_hours, parent.max_ttl_hours
-        )
-        .into());
+        )));
     }
 
     // Child rate limit cannot exceed parent
     if parent.max_rate_limit > 0 && child.max_rate_limit > parent.max_rate_limit {
-        return Err(format!(
+        return Err(A2gError::AuthorityChain(format!(
             "scope violation: max_rate_limit {} exceeds parent's {}",
             child.max_rate_limit, parent.max_rate_limit
-        )
-        .into());
+        )));
     }
 
     Ok(())

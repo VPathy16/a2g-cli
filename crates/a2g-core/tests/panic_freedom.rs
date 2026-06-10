@@ -24,10 +24,10 @@ use proptest::prelude::*;
 
 struct NoopLedger;
 impl EnforceLedger for NoopLedger {
-    fn is_revoked(&self, _: &str, _: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    fn is_revoked(&self, _: &str, _: &str) -> Result<bool, a2g_core::A2gError> {
         Ok(false)
     }
-    fn count_recent(&self, _: &str, _: i64) -> Result<u64, Box<dyn std::error::Error>> {
+    fn count_recent(&self, _: &str, _: i64) -> Result<u64, a2g_core::A2gError> {
         Ok(0)
     }
 }

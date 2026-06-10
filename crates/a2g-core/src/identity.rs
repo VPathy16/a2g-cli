@@ -5,6 +5,8 @@
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 
+use crate::error::A2gError;
+
 /// Generate a new ed25519 keypair and derive the A2G DID.
 /// Returns (did, secret_key_hex, public_key_hex)
 pub fn generate_agent_keypair() -> (String, String, String) {
@@ -22,33 +24,43 @@ pub fn generate_agent_keypair() -> (String, String, String) {
 }
 
 /// Derive DID from a public key hex string
-pub fn did_from_pubkey_hex(pubkey_hex: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let bytes = hex::decode(pubkey_hex)?;
+pub fn did_from_pubkey_hex(pubkey_hex: &str) -> Result<String, A2gError> {
+    let bytes = hex::decode(pubkey_hex).map_err(|e| A2gError::HexDecode(e.to_string()))?;
     Ok(format!("did:a2g:{}", bs58::encode(&bytes).into_string()))
 }
 
 /// Extract public key bytes from a DID string
-pub fn pubkey_from_did(did: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub fn pubkey_from_did(did: &str) -> Result<Vec<u8>, A2gError> {
     let prefix = "did:a2g:";
     if !did.starts_with(prefix) {
-        return Err("invalid DID format: must start with did:a2g:".into());
+        return Err(A2gError::MandateInvalid(
+            "invalid DID format: must start with did:a2g:".to_string(),
+        ));
     }
     let b58_part = &did[prefix.len()..];
-    let bytes = bs58::decode(b58_part).into_vec()?;
+    let bytes = bs58::decode(b58_part)
+        .into_vec()
+        .map_err(|e| A2gError::Internal(e.to_string()))?;
     Ok(bytes)
 }
 
 /// Validate a DID string format
-pub fn validate_did(did: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn validate_did(did: &str) -> Result<(), A2gError> {
     if did.is_empty() {
-        return Err("DID must not be empty".into());
+        return Err(A2gError::MandateInvalid(
+            "DID must not be empty".to_string(),
+        ));
     }
     if did.len() > 256 {
-        return Err("DID exceeds maximum length of 256 characters".into());
+        return Err(A2gError::MandateInvalid(
+            "DID exceeds maximum length of 256 characters".to_string(),
+        ));
     }
     // Check for control characters
     if did.chars().any(|c| c.is_control()) {
-        return Err("DID contains control characters".into());
+        return Err(A2gError::MandateInvalid(
+            "DID contains control characters".to_string(),
+        ));
     }
     Ok(())
 }

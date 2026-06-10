@@ -10,6 +10,7 @@
 //! "alloc"]`. See `docs/no_std-blockers.md` for current blockers keeping
 //! a2g-core on std.
 
+use crate::error::A2gError;
 use minicbor::bytes::ByteVec;
 use minicbor::{Decode, Encode};
 
@@ -51,13 +52,13 @@ pub struct GrantPayload {
 ///
 /// minicbor array encoding is inherently deterministic: element order equals
 /// declaration order. No key sorting is needed.
-pub fn encode_canonical<T: Encode<()>>(val: &T) -> Result<Vec<u8>, &'static str> {
+pub fn encode_canonical<T: Encode<()>>(val: &T) -> Result<Vec<u8>, A2gError> {
     let mut buf = Vec::new();
-    minicbor::encode(val, &mut buf).map_err(|_| "cbor encode failed")?;
+    minicbor::encode(val, &mut buf).map_err(|_| A2gError::CborEncode)?;
     Ok(buf)
 }
 
 /// Decode `bytes` as a `T` from CBOR.
-pub fn decode_canonical<'a, T: Decode<'a, ()>>(bytes: &'a [u8]) -> Result<T, &'static str> {
-    minicbor::decode(bytes).map_err(|_| "cbor decode failed")
+pub fn decode_canonical<'a, T: Decode<'a, ()>>(bytes: &'a [u8]) -> Result<T, A2gError> {
+    minicbor::decode(bytes).map_err(|_| A2gError::CborDecode)
 }
