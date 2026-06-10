@@ -20,6 +20,7 @@
 )]
 
 pub mod authority;
+pub mod cbor;
 pub mod enforce;
 pub mod hitl;
 pub mod identity;

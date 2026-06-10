@@ -285,8 +285,8 @@ fn beat3_forbidden_hard_deny(socket_path: &Path, demo_keys: &DemoKeys) -> Gatewa
         signature_hex: String::new(),
         attested_state_json: None,
     };
-    let payload = partial.canonical_payload();
-    let sig: ed25519_dalek::Signature = key.sign(payload.as_bytes());
+    let payload = partial.canonical_bytes().expect("canonical_bytes");
+    let sig: ed25519_dalek::Signature = key.sign(&payload);
     let receipt = GatewayReceipt {
         signature_hex: hex::encode(sig.to_bytes()),
         ..partial
@@ -415,7 +415,8 @@ fn beat4_hitl_door_unlock(socket_path: &Path, demo_keys: &DemoKeys) -> GatewayRe
         300,
         Utc::now(),
         &v1.verdict_id,
-    );
+    )
+    .expect("demo grant must sign");
     println!("  {BLUE}[HUMAN]{RESET} {BOLD}Grant signed.  Submitting to gateway ...{RESET}");
     println!();
 

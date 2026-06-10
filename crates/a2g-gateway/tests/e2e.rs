@@ -222,8 +222,8 @@ fn test_forbidden_refused_even_with_valid_sig() {
         signature_hex: String::new(),
         attested_state_json: None,
     };
-    let payload = partial.canonical_payload();
-    let sig: ed25519_dalek::Signature = key.sign(payload.as_bytes());
+    let payload = partial.canonical_bytes().expect("canonical_bytes");
+    let sig: ed25519_dalek::Signature = key.sign(&payload);
     let receipt = GatewayReceipt {
         signature_hex: hex::encode(sig.to_bytes()),
         ..partial
@@ -373,8 +373,8 @@ fn test_stale_receipt_refused() {
         signature_hex: String::new(),
         attested_state_json: None,
     };
-    let payload = partial.canonical_payload();
-    let sig: ed25519_dalek::Signature = key.sign(payload.as_bytes());
+    let payload = partial.canonical_bytes().expect("canonical_bytes");
+    let sig: ed25519_dalek::Signature = key.sign(&payload);
     let receipt = GatewayReceipt {
         signature_hex: hex::encode(sig.to_bytes()),
         ..partial
@@ -485,7 +485,8 @@ fn test_sensitive_parked_hitl_full_flow() {
         300, // 5-min TTL
         Utc::now(),
         &v1.verdict_id,
-    );
+    )
+    .expect("test grant must sign");
     let grant_json = serde_json::to_string(&grant).unwrap();
 
     // Submit grant to gateway.
@@ -612,8 +613,8 @@ fn test_attested_state_stale_rejected_by_gateway() {
         signature_hex: String::new(),
         attested_state_json: Some(attested_json), // stale blob
     };
-    let payload = partial.canonical_payload();
-    let sig: ed25519_dalek::Signature = key.sign(payload.as_bytes());
+    let payload = partial.canonical_bytes().expect("canonical_bytes");
+    let sig: ed25519_dalek::Signature = key.sign(&payload);
     let receipt = GatewayReceipt {
         signature_hex: hex::encode(sig.to_bytes()),
         ..partial
@@ -668,8 +669,8 @@ fn test_malformed_tool_no_panic() {
             signature_hex: String::new(),
             attested_state_json: None,
         };
-        let payload = partial.canonical_payload();
-        let sig: ed25519_dalek::Signature = wrong_key.sign(payload.as_bytes());
+        let payload = partial.canonical_bytes().expect("canonical_bytes");
+        let sig: ed25519_dalek::Signature = wrong_key.sign(&payload);
         let receipt = GatewayReceipt {
             signature_hex: hex::encode(sig.to_bytes()),
             ..partial
@@ -749,8 +750,8 @@ fn test_vcan_real_frame_and_no_frame_on_refused() {
         signature_hex: String::new(),
         attested_state_json: None,
     };
-    let payload = partial.canonical_payload();
-    let sig: ed25519_dalek::Signature = key.sign(payload.as_bytes());
+    let payload = partial.canonical_bytes().expect("canonical_bytes");
+    let sig: ed25519_dalek::Signature = key.sign(&payload);
     let forbidden_receipt = GatewayReceipt {
         signature_hex: hex::encode(sig.to_bytes()),
         ..partial

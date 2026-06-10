@@ -407,8 +407,9 @@ whose signature does not verify.
 | `DELEGATION:` | Authority delegation chain signing payload |
 | `REVIEW:` | Governance proposal review signing payload |
 | `REQUEST:` | HITL request binding hash (§7.3) |
-| `APPROVAL:` | HITL approval grant signing payload (§7.4) |
-| `RECEIPT:` | Gateway receipt canonical payload (§9.4) |
+| `BINDING` | Pending-approval binding CBOR tag (§7.2, ADR-0011) |
+| `APPROVAL` | HITL approval grant CBOR tag (§7.4, ADR-0011) |
+| `RECEIPT` | Gateway receipt CBOR tag (§9.4, ADR-0011) |
 
 No signature produced under one prefix MUST be valid under a different prefix.
 Implementations MUST verify that they are checking signatures with the correct
@@ -802,14 +803,22 @@ An `ApprovalGrant` is a signed token produced by the human approver. It MUST con
 | `expires_at` | RFC3339 timestamp | Grant TTL; grant MUST be rejected at or after this time |
 | `parent_receipt_hash` | string | Receipt hash of the Phase 1 PENDING_APPROVAL receipt |
 
-**ApprovalGrant signing payload:**
+**ApprovalGrant signing payload (ADR-0011 canonical CBOR):**
 
 ```
-SHA-256("APPROVAL:" || binding_id || ":" || request_hash || ":" || expires_at)
+CBOR array: ["APPROVAL", binding_id, request_hash(bstr 32B), expires_at(tstr RFC3339)]
 ```
 
-The `"APPROVAL:"` prefix is a domain separator. The signature is computed over the
-SHA-256 digest of this string, not the string itself.
+The ed25519 signature is computed over the canonical CBOR encoding of the array above.
+`request_hash` MUST be encoded as a CBOR byte string (`bstr`, major type 2) containing
+the raw 32 SHA-256 bytes decoded from the hex representation. The `"APPROVAL"` tag at
+position 0 provides domain separation — this payload cannot be confused with a
+`BindingPayload` (tag `"BINDING"`) or `ReceiptPayload` (tag `"RECEIPT"`).
+
+**Encoding rules (RFC 8949 canonical form):**
+- Array encoding: field order equals the declared position order above.
+- Integers use shortest-form CBOR (e.g., `i64` as `0x1b…` only if value requires 8 bytes).
+- No key-sorting is needed (arrays have no map keys).
 
 ### 7.5 Phase 2 Grant Validation
 
@@ -820,7 +829,7 @@ The Decision Engine MUST validate the `ApprovalGrant` against the
 2. `request_hash` in the grant MUST equal `request_hash` in the pending binding.
 3. Current time (`now`) MUST be before `grant.expires_at`.
 4. The ed25519 signature MUST verify against `approver_pubkey` using the
-   `"APPROVAL:"` payload.
+   canonical CBOR `GrantPayload` bytes (§7.4).
 5. Current time MUST be before `pending.ttl_expires_at`.
 
 A grant that passes all five checks is valid. The Decision Engine proceeds with
@@ -1002,14 +1011,23 @@ to the Enforcing Gateway. A Gateway Receipt MUST contain:
 | `nonce_hex` | string | 16 random bytes, hex-encoded |
 | `signature_hex` | string | ed25519 signature over the canonical payload |
 
-**Gateway receipt canonical payload (signed):**
+**Gateway receipt canonical payload (ADR-0011 canonical CBOR):**
 
 ```
-RECEIPT:<verdict_id>:<decision>:<tool>:<request_hash>:<binding_id>:<issued_at_ms>:<nonce_hex>
+CBOR array: ["RECEIPT", verdict_id, decision, tool,
+             request_hash(bstr 32B), binding_id,
+             issued_at_ms(int), nonce(bstr 16B)]
 ```
+
+The ed25519 signature is computed over the canonical CBOR encoding of the array above.
+`request_hash` and `nonce` MUST be encoded as CBOR byte strings (`bstr`, major type 2)
+containing the raw bytes decoded from their hex representations. Field order is
+positional and fixed. The `"RECEIPT"` tag at position 0 is the domain separator.
 
 The full `params_json` is covered by `request_hash` rather than included directly
-in the signed string; the gateway verifies the hash rather than the full payload.
+in the signed payload; the gateway verifies the hash rather than the full payload.
+
+**Encoding rules:** see §7.4 (same canonical-CBOR rules apply to all signed payloads).
 
 ### 9.5 Gateway Verification Steps
 
@@ -1024,8 +1042,10 @@ is performed unconditionally on unverified input (the classifier is
 allocation-free, panic-free, and bounded — §3.3 item 2).
 
 **Step 2 — Signature**  
-Recompute the canonical payload from receipt fields. Verify the ed25519 signature
-against the known rich-domain receipt-signing public key. Reject if invalid.
+Compute the canonical CBOR bytes from receipt fields (§9.4). Hex-decode
+`request_hash` and `nonce_hex` to raw bytes; reject immediately if either is not
+valid hex. Verify the ed25519 signature over the CBOR bytes against the known
+rich-domain receipt-signing public key. Reject if invalid.
 
 **Step 3 — Decision is ALLOW**  
 `receipt.decision` MUST equal `"ALLOW"`. Any other value (DENY, EXPIRED,

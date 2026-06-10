@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Breaking
 
+- **Wire-format change: colon-delimited signed payloads replaced with canonical CBOR (ADR-0011)**
+  — affects `GatewayReceipt` (signed), `PendingApprovalBinding` MAC (gateway + FFI),
+  and `ApprovalGrant` signing. Old colon-delimited receipts, bindings, and grants will **not**
+  verify against the new code. No dual-accept fallback.
+  - `GatewayReceipt::canonical_payload() -> String` replaced by `canonical_bytes() -> Result<Vec<u8>, &'static str>`.
+  - `binding_payload()` functions in `server.rs` and `ffi/src/lib.rs` replaced by CBOR byte encoders.
+  - `ApprovalGrant::payload_hash()` replaced by `payload_bytes()`; signing is now directly over CBOR bytes (no SHA-256 pre-hash).
+  - `ApprovalGrant::new_signed()` now returns `Result<Self, &'static str>` (was `Self`).
+  - `ApprovalGrantError::EncodingError` variant added to handle malformed `request_hash` hex.
+  - CBOR payload structs: `BindingPayload`, `GrantPayload` in `a2g_core::cbor`; `ReceiptPayload` in `a2g_gateway::protocol`.
+  - SPEC §4.5 domain-separator table updated; §7.4 and §9.4 now specify canonical CBOR encoding rules.
+  - Note: mandate-CBOR migration is the next task (mandate payload is unchanged).
+
 - **`VehicleState.speed_kph: f64` replaced by `speed_mmps: u32`** — the decision path
   is now float-free (fixed-point determinism, feat/fixed-point-determinism).
   - JSON key in `vehicle_state` params changes from `"speed_kph"` to `"speed_mmps"`.

@@ -3,17 +3,46 @@
 //! All messages are newline-delimited JSON over a Unix domain socket.
 //! One request per connection; server responds then closes the connection.
 
+use a2g_core::cbor::encode_canonical;
+use minicbor::bytes::ByteVec;
+use minicbor::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Canonical CBOR array for `GatewayReceipt` signing (ADR-0011).
+///
+/// `["RECEIPT", verdict_id, decision, tool, request_hash(bstr 32B),
+///  binding_id, issued_at_ms, nonce(bstr 16B)]`
+#[derive(Debug, Encode, Decode)]
+#[cbor(array)]
+pub struct ReceiptPayload {
+    #[n(0)]
+    pub tag: String,
+    #[n(1)]
+    pub verdict_id: String,
+    #[n(2)]
+    pub decision: String,
+    #[n(3)]
+    pub tool: String,
+    #[n(4)]
+    pub request_hash: ByteVec,
+    #[n(5)]
+    pub binding_id: String,
+    #[n(6)]
+    pub issued_at_ms: i64,
+    #[n(7)]
+    pub nonce: ByteVec,
+}
+
 /// A receipt produced by the rich domain for an ALLOW verdict.
 ///
-/// The gateway verifies this before any bus write. The canonical signed
-/// payload (ADR-0010 §Signed payload):
-/// `RECEIPT:{verdict_id}:{decision}:{tool}:{request_hash}:{binding_id}:{issued_at_ms}:{nonce_hex}`
+/// The gateway verifies this before any bus write. The canonical signed payload
+/// is canonical CBOR (ADR-0011): a `ReceiptPayload` array encoding
+/// `["RECEIPT", verdict_id, decision, tool, request_hash(bstr), binding_id,
+///  issued_at_ms, nonce(bstr)]`.
 ///
 /// `request_hash = SHA-256(tool || params_json || issued_at_ms.to_string())`
-/// so the full params are covered by the hash without being in the signed string.
+/// so the full params are covered by the hash without being in the signed payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayReceipt {
     /// UUID from the a2g-core Verdict.
@@ -45,18 +74,24 @@ pub struct GatewayReceipt {
 }
 
 impl GatewayReceipt {
-    /// Canonical payload that is signed and verified (ADR-0010 §Signed payload).
-    pub fn canonical_payload(&self) -> String {
-        format!(
-            "RECEIPT:{}:{}:{}:{}:{}:{}:{}",
-            self.verdict_id,
-            self.decision,
-            self.tool,
-            self.request_hash,
-            self.binding_id,
-            self.issued_at_ms,
-            self.nonce_hex,
-        )
+    /// Canonical CBOR bytes that are signed and verified (ADR-0011).
+    ///
+    /// Returns `Err` if `request_hash` or `nonce_hex` are not valid hex strings.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        let request_hash =
+            hex::decode(&self.request_hash).map_err(|_| "invalid request_hash hex")?;
+        let nonce = hex::decode(&self.nonce_hex).map_err(|_| "invalid nonce hex")?;
+        let payload = ReceiptPayload {
+            tag: "RECEIPT".to_string(),
+            verdict_id: self.verdict_id.clone(),
+            decision: self.decision.clone(),
+            tool: self.tool.clone(),
+            request_hash: request_hash.into(),
+            binding_id: self.binding_id.clone(),
+            issued_at_ms: self.issued_at_ms,
+            nonce: nonce.into(),
+        };
+        encode_canonical(&payload)
     }
 
     /// Compute the expected `request_hash` from the receipt fields.
