@@ -674,7 +674,8 @@ If no `VerifiedVehicleState` is supplied, the Decision Engine MUST use a fail-sa
 default state. The fail-safe default MUST represent worst-case conditions that
 cause all Sensitive-domain capabilities to produce DENY.
 
-The reference fail-safe is: `{speed_kph: 999.0, gear: Drive, actor: Driver}`.
+The reference fail-safe is: `{speed_mmps: 277500, gear: Drive, actor: Driver}`.
+(277 500 mm/s = 999 km/h, the fixed-point encoding of the former `999.0 km/h` float.)
 
 Omitting vehicle state for a Sensitive-domain capability MUST result in DENY, not
 ALLOW.
@@ -685,6 +686,58 @@ State verification (signature check + freshness check) MUST be performed by the
 Enforcing Gateway, not the Decision Engine. This preserves the Decision Engine's
 purity: it does not hold signing keys, does not call the HAL, and does not perform
 I/O. The Enforcing Gateway supplies only the verified result to the Decision Engine.
+
+### 6.8 Fixed-Point Speed Encoding (normative)
+
+The Decision Engine MUST NOT perform floating-point arithmetic on the decision path.
+Speed is represented as a fixed-point integer to guarantee bit-identical results
+across any target regardless of FPU (hardware FPU, soft-float, simulator).
+
+#### 6.8.1 Canonical Representation
+
+| Property | Value |
+|---|---|
+| Field name | `speed_mmps` |
+| Type | `u32` (unsigned 32-bit integer) |
+| Unit | millimetres per second (mm/s) |
+| Valid range | `[0, 277 778]` (0 km/h to 1 000 km/h) |
+| Gate threshold | `SPEED_GATE_MMPS = 1 389` |
+| Fail-safe value | `FAIL_SAFE_SPEED_MMPS = 277 500` (999 km/h) |
+
+The gate condition `speed_mmps < SPEED_GATE_MMPS` is the fixed-point equivalent
+of the former float condition `speed_kph < 5.0`. Effective threshold precision:
+±1 mm/s (≈ 0.0036 km/h).
+
+#### 6.8.2 Float-to-Fixed Conversion
+
+Floating-point speed values (e.g. from AAOS `PERF_VEHICLE_SPEED` in m/s, or from
+operator input in km/h) MUST be validated and converted at the ingress boundary
+**before** constructing `VehicleState`. The canonical conversion is:
+
+```
+speed_mmps = round(speed_kph × 1 000 000 ÷ 3 600)
+```
+
+where `round()` is "round half to even" (or "round half up" — the difference
+is at most 1 mm/s, which is below the gate threshold precision).
+
+#### 6.8.3 Boundary Rejection Rule
+
+The following float inputs MUST be **rejected** at the ingress boundary (return an
+error / `NULL` handle / fail-safe DENY). They MUST NOT be silently coerced into
+the fixed-point domain:
+
+| Condition | Reason |
+|---|---|
+| NaN | not a number — undefined speed |
+| ±Infinity | unbounded — cannot be represented |
+| Negative (`< 0.0`) | physically impossible speed |
+| Subnormal | near-zero denormal — out-of-normal range |
+| `> SPEED_MAX_KPH` (1 000 km/h) | exceeds maximum accepted speed |
+
+Implementations that receive a rejected value MUST treat the call as if no valid
+state was supplied, which causes all Sensitive-domain capabilities to produce DENY
+via the fail-safe default (§6.6).
 
 ---
 

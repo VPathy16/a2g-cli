@@ -27,7 +27,7 @@
 //! ## AAOS VHAL state fields
 //!
 //! Vehicle-state gating reads from two AAOS properties:
-//! - `PERF_VEHICLE_SPEED` (VehicleProperty 0x11600207, m/s) → stored as `speed_kph`
+//! - `PERF_VEHICLE_SPEED` (VehicleProperty 0x11600207, m/s) → converted and stored as `speed_mmps`
 //! - `GEAR_SELECTION` (VehicleProperty 0x11400400) → stored as `gear`
 //!
 //! ## no_std compatibility
@@ -86,27 +86,91 @@ pub enum Actor {
     Passenger,
 }
 
+/// Speed threshold for the "parked and stopped" gate: 5.0 km/h ≈ 1388.9 mm/s, rounded up.
+///
+/// `speed_mmps < SPEED_GATE_MMPS` is the fixed-point equivalent of `speed_kph < 5.0`.
+/// Gate condition: **strictly less than** this value.
+pub const SPEED_GATE_MMPS: u32 = 1_389;
+
+/// Fail-safe speed for the worst-case default state (999 km/h expressed in mm/s).
+///
+/// 999 km/h × (1 000 000 mm/km) ÷ (3 600 s/h) = 277 500 mm/s exactly.
+pub const FAIL_SAFE_SPEED_MMPS: u32 = 277_500;
+
+/// Maximum speed accepted at the ingress boundary (km/h).
+///
+/// Speeds above this value are rejected by [`speed_kph_to_mmps`] with an error.
+pub const SPEED_MAX_KPH: f64 = 1_000.0;
+
+/// Convert a floating-point speed in km/h to the canonical fixed-point representation.
+///
+/// This is the **sole** float-to-integer conversion on the vehicle-state path.
+/// All validation happens here; `VehicleState.speed_mmps` is always a valid integer.
+///
+/// ## Rejection rule
+///
+/// The following inputs are rejected (return `Err`), mapping to fail-safe DENY at
+/// the call site:
+///
+/// | Input condition         | Reason                        |
+/// |-------------------------|-------------------------------|
+/// | NaN                     | not a number                  |
+/// | ±Infinity               | infinite speed                |
+/// | Negative (`< 0.0`)      | physically impossible         |
+/// | Subnormal               | out-of-range near zero        |
+/// | `> SPEED_MAX_KPH`       | exceeds maximum accepted speed |
+///
+/// ## Encoding
+///
+/// Valid inputs are converted by: `round(speed_kph × 1 000 000 ÷ 3 600)`.
+/// The result fits in `u32` for all inputs ≤ `SPEED_MAX_KPH` (max ≈ 277 778 mm/s).
+///
+/// The 5.0 km/h gate threshold (1388.888… mm/s) rounds to [`SPEED_GATE_MMPS`] = 1 389.
+/// Effective threshold precision: ± 1 mm/s (≈ 0.0036 km/h).
+pub fn speed_kph_to_mmps(speed_kph: f64) -> Result<u32, &'static str> {
+    if speed_kph.is_nan() {
+        return Err("speed_kph_to_mmps: speed is NaN");
+    }
+    if speed_kph.is_infinite() {
+        return Err("speed_kph_to_mmps: speed is infinite");
+    }
+    if speed_kph < 0.0 {
+        return Err("speed_kph_to_mmps: speed is negative");
+    }
+    if speed_kph.is_subnormal() {
+        return Err("speed_kph_to_mmps: speed is subnormal");
+    }
+    if speed_kph > SPEED_MAX_KPH {
+        return Err("speed_kph_to_mmps: speed exceeds SPEED_MAX_KPH");
+    }
+    // Validated range: [0.0, 1000.0] → [0, 277_778] mm/s — well within u32::MAX.
+    let mmps_f = speed_kph * (1_000_000.0_f64 / 3_600.0_f64);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(mmps_f.round() as u32)
+}
+
 /// Current vehicle physical state, supplied as context at decision time.
 ///
 /// Field names and semantics map to AAOS VHAL properties:
-/// - `speed_kph` — sourced from `PERF_VEHICLE_SPEED` (VehicleProperty 0x11600207).
-///   AAOS reports this in m/s; callers convert to km/h before populating this field.
-///   Values < 0 are clamped to 0.
+/// - `speed_mmps` — fixed-point speed in mm/s. Sourced from `PERF_VEHICLE_SPEED`
+///   (m/s in AAOS); the caller validates and converts via [`speed_kph_to_mmps`]
+///   before constructing this struct. No `f64` reaches the decision path.
 /// - `gear` — sourced from `GEAR_SELECTION` (VehicleProperty 0x11400400) or
 ///   `CURRENT_GEAR` (VehicleProperty 0x11400401).
 /// - `actor` — derived from the active UX session (driver vs. passenger zone).
 ///
 /// Passed in the `vehicle_state` key of the params JSON:
 /// ```json
-/// {"speed_kph": 0.0, "gear": "Park", "actor": "Driver"}
+/// {"speed_mmps": 0, "gear": "Park", "actor": "Driver"}
 /// ```
 ///
 /// If absent for a `Sensitive` capability, `VehicleState::fail_safe()` is used —
 /// assumes highway speed in Drive, so sensitive actions are **DENIED by omission**.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VehicleState {
-    /// Speed in km/h. Corresponds to `PERF_VEHICLE_SPEED` (m/s in AAOS; convert before use).
-    pub speed_kph: f64,
+    /// Speed in mm/s (fixed-point). Converted from `PERF_VEHICLE_SPEED` (m/s in AAOS)
+    /// at the ingress boundary via [`speed_kph_to_mmps`]. No float on the decision path.
+    pub speed_mmps: u32,
     /// Current gear selector position. Corresponds to `GEAR_SELECTION` / `CURRENT_GEAR`.
     pub gear: Gear,
     /// Who is making the request.
@@ -114,13 +178,13 @@ pub struct VehicleState {
 }
 
 impl VehicleState {
-    /// Fail-safe worst-case default: 999 km/h in Drive.
+    /// Fail-safe worst-case default: `FAIL_SAFE_SPEED_MMPS` (999 km/h) in Drive.
     ///
     /// Used when no `vehicle_state` is provided. Ensures sensitive capabilities
     /// are denied by omission rather than accidentally allowed.
     pub fn fail_safe() -> Self {
         VehicleState {
-            speed_kph: 999.0,
+            speed_mmps: FAIL_SAFE_SPEED_MMPS,
             gear: Gear::Drive,
             actor: Actor::Driver,
         }
@@ -128,15 +192,12 @@ impl VehicleState {
 
     /// `true` when the vehicle is safely stationary in Park.
     ///
-    /// Evaluates: `PERF_VEHICLE_SPEED < 5.0 km/h AND GEAR_SELECTION == GEAR_PARK`.
+    /// Evaluates: `speed_mmps < SPEED_GATE_MMPS AND GEAR_SELECTION == GEAR_PARK`.
+    /// Equivalent to the float condition `speed_kph < 5.0 AND gear == Park`,
+    /// but computed entirely in integer arithmetic — no float on the decision path.
     /// Required for all Sensitive capabilities (window, door, trunk, lock).
     pub fn is_parked_and_stopped(&self) -> bool {
-        let speed = if self.speed_kph < 0.0 {
-            0.0
-        } else {
-            self.speed_kph
-        };
-        speed < 5.0 && self.gear == Gear::Park
+        self.speed_mmps < SPEED_GATE_MMPS && self.gear == Gear::Park
     }
 }
 
@@ -341,7 +402,7 @@ pub static VHAL_PROPERTIES: &[VhalPropertyMapping] = &[
         access: VhalAccessMode::Read,
         domain: VehicleDomain::NonVehicle,
         description:
-            "Current vehicle speed in m/s; maps to VehicleState::speed_kph after conversion",
+            "Current vehicle speed in m/s; converted to mm/s via speed_kph_to_mmps() at ingress",
     },
     VhalPropertyMapping {
         name: "PERF_VEHICLE_SPEED_DISPLAY", // 0x11600208 — READ (m/s, display-filtered)
@@ -514,7 +575,7 @@ pub fn evaluate_vehicle_state(_tool: &str, state: &VehicleState) -> StateVerdict
     if !state.is_parked_and_stopped() {
         return StateVerdict::Deny(
             "vehicle_state_violation: sensitive capabilities (window/door/trunk/lock) \
-             require speed_kph < 5.0 and gear == Park",
+             require speed_mmps < 1389 (< 5.0 km/h) and gear == Park",
         );
     }
     StateVerdict::Allow
@@ -522,8 +583,8 @@ pub fn evaluate_vehicle_state(_tool: &str, state: &VehicleState) -> StateVerdict
 
 /// Extract a `VehicleState` from the `vehicle_state` key in params JSON.
 ///
-/// The caller is responsible for converting `PERF_VEHICLE_SPEED` (m/s in AAOS)
-/// to km/h before populating `speed_kph`. Falls back to `VehicleState::fail_safe()`
+/// Expects `{"speed_mmps": <u32>, "gear": "Park"|"Drive"|"Reverse"|"Neutral",
+/// "actor": "Driver"|"Passenger"}`. Falls back to `VehicleState::fail_safe()`
 /// if the key is absent or cannot be deserialized, so omitting state for a
 /// Sensitive capability is safe by default.
 pub fn extract_vehicle_state(params: &serde_json::Value) -> VehicleState {
@@ -1022,7 +1083,7 @@ mod tests {
     #[test]
     fn test_parked_stopped_allows_sensitive() {
         let state = VehicleState {
-            speed_kph: 0.0,
+            speed_mmps: 0,
             gear: Gear::Park,
             actor: Actor::Driver,
         };
@@ -1040,7 +1101,7 @@ mod tests {
     #[test]
     fn test_moving_denies_sensitive() {
         let state = VehicleState {
-            speed_kph: 30.0,
+            speed_mmps: 8_333, // 30.0 km/h
             gear: Gear::Drive,
             actor: Actor::Driver,
         };
@@ -1054,7 +1115,7 @@ mod tests {
     #[test]
     fn test_speed_below_threshold_but_not_park_denies() {
         let state = VehicleState {
-            speed_kph: 3.0,
+            speed_mmps: 833,   // 3.0 km/h
             gear: Gear::Drive, // still in Drive
             actor: Actor::Passenger,
         };
@@ -1062,7 +1123,7 @@ mod tests {
             evaluate_vehicle_state("vehicle.door.unlock", &state),
             StateVerdict::Deny(
                 "vehicle_state_violation: sensitive capabilities (window/door/trunk/lock) \
-                 require speed_kph < 5.0 and gear == Park"
+                 require speed_mmps < 1389 (< 5.0 km/h) and gear == Park"
             )
         );
     }
@@ -1071,7 +1132,7 @@ mod tests {
     fn test_park_gear_high_speed_denies() {
         // Physically impossible, but the engine must be fail-safe.
         let state = VehicleState {
-            speed_kph: 60.0,
+            speed_mmps: 16_667, // 60.0 km/h
             gear: Gear::Park,
             actor: Actor::Driver,
         };
@@ -1086,7 +1147,7 @@ mod tests {
     fn test_fail_safe_default_denies_sensitive() {
         let params = serde_json::json!({}); // no vehicle_state
         let state = extract_vehicle_state(&params);
-        assert!(state.speed_kph > 5.0);
+        assert!(state.speed_mmps >= SPEED_GATE_MMPS);
         assert_eq!(state.gear, Gear::Drive);
         assert!(matches!(
             evaluate_vehicle_state("WINDOW_POS", &state),
@@ -1097,7 +1158,7 @@ mod tests {
     #[test]
     fn test_extract_valid_state() {
         let params = serde_json::json!({
-            "vehicle_state": {"speed_kph": 0.0, "gear": "Park", "actor": "Passenger"}
+            "vehicle_state": {"speed_mmps": 0, "gear": "Park", "actor": "Passenger"}
         });
         let state = extract_vehicle_state(&params);
         assert_eq!(state.gear, Gear::Park);

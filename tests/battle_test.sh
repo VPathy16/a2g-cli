@@ -421,7 +421,7 @@ RESULT=$($A2G --output json enforce \
     --mandate "$CABIN_MANDATE" \
     --tool vehicle.climate.set_temperature \
     --params '{"setting":"22C"}' \
-    --vehicle-state '{"speed_kph":80.0,"gear":"Drive","actor":"Passenger"}' \
+    --vehicle-state '{"speed_mmps":22222,"gear":"Drive","actor":"Passenger"}' \
     --ledger "$CABIN_LEDGER" 2>&1 || true)
 if echo "$RESULT" | grep -q '"ALLOW"'; then
     pass "Vehicle comfort ALLOW while moving (climate, 80 kph, Passenger)"
@@ -434,7 +434,7 @@ RESULT=$($A2G --output json enforce \
     --mandate "$CABIN_MANDATE" \
     --tool vehicle.window.set_position \
     --params '{"position":50}' \
-    --vehicle-state '{"speed_kph":0.0,"gear":"Park","actor":"Driver"}' \
+    --vehicle-state '{"speed_mmps":0,"gear":"Park","actor":"Driver"}' \
     --ledger "$CABIN_LEDGER" 2>&1 || true)
 if echo "$RESULT" | grep -q '"ALLOW"'; then
     pass "Vehicle sensitive ALLOW when Park+stopped (window, 0 kph)"
@@ -447,7 +447,7 @@ RESULT=$($A2G --output json enforce \
     --mandate "$CABIN_MANDATE" \
     --tool vehicle.window.set_position \
     --params '{"position":50}' \
-    --vehicle-state '{"speed_kph":60.0,"gear":"Drive","actor":"Driver"}' \
+    --vehicle-state '{"speed_mmps":16667,"gear":"Drive","actor":"Driver"}' \
     --ledger "$CABIN_LEDGER" 2>&1 || true)
 if echo "$RESULT" | grep -q "vehicle_state_violation"; then
     pass "Vehicle sensitive DENY while moving (window, 60 kph)"

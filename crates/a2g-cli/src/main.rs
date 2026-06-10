@@ -153,7 +153,7 @@ enum Commands {
         /// Parent receipt hash (from triggering receipt)
         #[arg(long)]
         parent_receipt: Option<String>,
-        /// Vehicle state JSON for vehicle.* capabilities (e.g. {"speed_kph":0,"gear":"Park","actor":"Driver"})
+        /// Vehicle state JSON for vehicle.* capabilities (e.g. {"speed_mmps":0,"gear":"Park","actor":"Driver"})
         #[arg(long)]
         vehicle_state: Option<String>,
     },

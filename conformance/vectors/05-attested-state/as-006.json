@@ -1,0 +1,36 @@
+{
+  "id": "as-006",
+  "spec_ref": "§6.8",
+  "category": "attested-state",
+  "description": "Negative speed_kph is rejected at the ingress boundary → fail-safe DENY (no state → 277500 mm/s Drive)",
+  "known_failing": false,
+  "known_failing_reason": null,
+  "input": {
+    "mandate_capabilities": ["vehicle.window.set_position"],
+    "mandate_escalate_tools": [],
+    "mandate_expires_in_hours": 24,
+    "mandate_bad_signature": false,
+    "mandate_use_spec_signing": false,
+    "mandate_workspace_root": null,
+    "mandate_operating_hours": null,
+    "mandate_rate_limit": 120,
+    "mandate_fs_deny": [],
+    "mandate_fs_read": [],
+    "mandate_fs_write": [],
+    "capability": "vehicle.window.set_position",
+    "params": {"position": 50},
+    "state_speed_kph": -10.0,
+    "state_gear": "Park",
+    "state_actor": "Driver",
+    "state_trust": null,
+    "clock_offset_seconds": 0,
+    "phase2_grant_type": null,
+    "gateway_test_type": null
+  },
+  "expected": {
+    "verdict": "DENY",
+    "policy_rule_contains": "vehicle_state_violation",
+    "gateway_enforced": null,
+    "gateway_refused_reason_contains": null
+  }
+}
