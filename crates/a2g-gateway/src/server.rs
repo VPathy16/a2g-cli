@@ -446,9 +446,7 @@ pub fn verify_signed_binding(
     let payload = binding_bytes(&binding).ok()?;
     let sig_bytes: [u8; 64] = hex::decode(&wire.a2g_mac).ok()?.try_into().ok()?;
     let sig = Signature::from_bytes(&sig_bytes);
-    binding_key_verifying
-        .verify(&payload, &sig)
-        .ok()?;
+    binding_key_verifying.verify(&payload, &sig).ok()?;
     Some(binding)
 }
 

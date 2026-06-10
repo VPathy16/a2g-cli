@@ -88,10 +88,7 @@ fn verify_and_extract(signed_s: &str) -> Option<PendingApprovalBinding> {
     let payload = binding_bytes(&signed.binding)?;
     let sig_bytes: [u8; 64] = hex::decode(&signed.a2g_mac).ok()?.try_into().ok()?;
     let sig = Signature::from_bytes(&sig_bytes);
-    binding_key()
-        .verifying_key()
-        .verify(&payload, &sig)
-        .ok()?;
+    binding_key().verifying_key().verify(&payload, &sig).ok()?;
     Some(signed.binding)
 }
 
