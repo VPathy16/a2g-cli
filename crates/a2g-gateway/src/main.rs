@@ -91,11 +91,21 @@ fn main() {
         }
         None => PendingQueue::new(),
     };
-    let state = Arc::new(GatewayState::new_with_queue(gateway_keys, demo_keys, &vcan_iface, pending));
+    let state = Arc::new(GatewayState::new_with_queue(
+        gateway_keys,
+        demo_keys,
+        &vcan_iface,
+        pending,
+    ));
 
     if state_ingest {
         let ingest = Arc::clone(&state.state_ingest);
-        spawn_reader(ingest, vcan_iface.clone(), DEFAULT_SPEED_CAN_ID, DEFAULT_GEAR_CAN_ID);
+        spawn_reader(
+            ingest,
+            vcan_iface.clone(),
+            DEFAULT_SPEED_CAN_ID,
+            DEFAULT_GEAR_CAN_ID,
+        );
         eprintln!(
             "[gateway] state-ingest: subscribing to {vcan_iface} \
              (speed=0x{DEFAULT_SPEED_CAN_ID:03X} gear=0x{DEFAULT_GEAR_CAN_ID:03X})"

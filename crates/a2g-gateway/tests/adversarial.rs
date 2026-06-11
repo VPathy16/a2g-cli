@@ -92,9 +92,13 @@ impl Adv {
         )
         .unwrap();
         assert_eq!(verdict.decision, Decision::Allow);
-        sign_fresh_receipt(&verdict, "vehicle.climate.set_temperature", "{}", &self.receipt_sk)
+        sign_fresh_receipt(
+            &verdict,
+            "vehicle.climate.set_temperature",
+            "{}",
+            &self.receipt_sk,
+        )
     }
-
 }
 
 impl Drop for Adv {
@@ -113,11 +117,7 @@ fn make_cbor_mandate(tools: &[&str], escalate_tools: &[&str]) -> Vec<u8> {
     let (agent_did, _, _) = a2g_core::identity::generate_agent_keypair();
     let (_, secret, _) = a2g_core::identity::generate_agent_keypair();
     let sk = ed25519_dalek::SigningKey::from_bytes(
-        &hex::decode(&secret)
-            .unwrap()
-            .as_slice()
-            .try_into()
-            .unwrap(),
+        &hex::decode(&secret).unwrap().as_slice().try_into().unwrap(),
     );
     let vk = sk.verifying_key();
     let now = Utc::now();

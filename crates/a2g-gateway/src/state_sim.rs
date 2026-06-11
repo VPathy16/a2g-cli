@@ -15,10 +15,10 @@
 //! On non-Linux targets this binary compiles but immediately prints an error and
 //! exits — SocketCAN is Linux-only.
 
+use a2g_core::vehicle::{speed_kph_to_mmps, Gear};
 use a2g_gateway::state_ingest::{
     encode_gear_frame, encode_speed_frame, DEFAULT_GEAR_CAN_ID, DEFAULT_SPEED_CAN_ID,
 };
-use a2g_core::vehicle::{speed_kph_to_mmps, Gear};
 use a2g_gateway::DEFAULT_VCAN_IFACE;
 
 fn main() {

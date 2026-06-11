@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 use crate::transport;
 
 use a2g_core::hitl::{ApprovalGrant, PendingApprovalBinding, SignedBinding};
-use a2g_core::vehicle::{classify_vehicle_tool, AttestedVehicleState, VehicleDomain, ATTESTATION_FRESHNESS_MS};
+use a2g_core::vehicle::{
+    classify_vehicle_tool, AttestedVehicleState, VehicleDomain, ATTESTATION_FRESHNESS_MS,
+};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
@@ -32,7 +34,7 @@ use crate::state_ingest::StateIngest;
 use crate::bus;
 use crate::forbidden;
 use crate::keys::{DemoKeys, GatewayKeys};
-use crate::pending::{PendingQueue};
+use crate::pending::PendingQueue;
 use crate::protocol::{GatewayReceipt, GatewayRequest, GatewayResponse};
 
 /// Receipt freshness window.

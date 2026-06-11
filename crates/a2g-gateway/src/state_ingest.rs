@@ -161,20 +161,30 @@ pub enum FrameError {
 ///
 /// `last_counter` is the counter of the previous *accepted* speed frame, or
 /// `None` for the first frame.
-pub fn verify_speed_frame(frame: &[u8; 8], last_counter: Option<u8>) -> Result<(u32, u8), FrameError> {
+pub fn verify_speed_frame(
+    frame: &[u8; 8],
+    last_counter: Option<u8>,
+) -> Result<(u32, u8), FrameError> {
     verify_trailer(frame, SPEED_DATA_ID, last_counter)?;
     let speed = u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
     Ok((speed, frame[6] & 0x0F))
 }
 
 /// Verify a gear frame. Returns `(gear, counter)` on success.
-pub fn verify_gear_frame(frame: &[u8; 8], last_counter: Option<u8>) -> Result<(Gear, u8), FrameError> {
+pub fn verify_gear_frame(
+    frame: &[u8; 8],
+    last_counter: Option<u8>,
+) -> Result<(Gear, u8), FrameError> {
     verify_trailer(frame, GEAR_DATA_ID, last_counter)?;
     let gear = byte_to_gear(frame[0]).ok_or(FrameError::Malformed)?;
     Ok((gear, frame[6] & 0x0F))
 }
 
-fn verify_trailer(frame: &[u8; 8], data_id: u8, last_counter: Option<u8>) -> Result<(), FrameError> {
+fn verify_trailer(
+    frame: &[u8; 8],
+    data_id: u8,
+    last_counter: Option<u8>,
+) -> Result<(), FrameError> {
     // CRC first: a frame that fails integrity tells us nothing about its counter.
     if frame_crc(&frame[..7], data_id) != frame[7] {
         return Err(FrameError::BadCrc);
@@ -373,11 +383,15 @@ fn reader_loop(
     let reader = match crate::bus::CanReader::open(iface, 100) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[gateway:ingest] cannot open CAN reader on {iface}: {e}; state stays fail-safe");
+            eprintln!(
+                "[gateway:ingest] cannot open CAN reader on {iface}: {e}; state stays fail-safe"
+            );
             return;
         }
     };
-    eprintln!("[gateway:ingest] reading speed=0x{speed_can_id:03X} gear=0x{gear_can_id:03X} on {iface}");
+    eprintln!(
+        "[gateway:ingest] reading speed=0x{speed_can_id:03X} gear=0x{gear_can_id:03X} on {iface}"
+    );
     while !stop.load(Ordering::Relaxed) {
         match reader.read_frame() {
             Ok(Some((can_id, data))) => {

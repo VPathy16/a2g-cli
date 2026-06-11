@@ -249,7 +249,9 @@ impl PendingQueue {
     }
 
     fn save_if_persistent(&self) {
-        let Some(path) = &self.persist_path else { return };
+        let Some(path) = &self.persist_path else {
+            return;
+        };
         let snap = QueueSnapshot {
             entries: self
                 .entries

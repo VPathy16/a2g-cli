@@ -1277,7 +1277,10 @@ mod tests {
             actor: Actor::Driver,
         };
         assert!(
-            matches!(evaluate_comfort_state("SEAT_FORE_AFT_MOVE", &state), StateVerdict::Deny(_)),
+            matches!(
+                evaluate_comfort_state("SEAT_FORE_AFT_MOVE", &state),
+                StateVerdict::Deny(_)
+            ),
             "driver seat adjustment at SPEED_GATE_MMPS must be DENY"
         );
     }
