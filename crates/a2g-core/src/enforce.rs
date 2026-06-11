@@ -23,16 +23,52 @@
 //! - `canonicalize_path_logical`: one `Vec<&str>` + `join()` per path check.
 //! - `format!()` calls in policy-rule strings: unavoidable until policy rules are static strs.
 
+use crate::cbor::CborMandate;
 use crate::error::A2gError;
 use crate::hitl::{
     self, compute_request_hash, PendingApprovalBinding, PENDING_APPROVAL_TTL_MINUTES,
 };
 use crate::ledger::EnforceLedger;
-use crate::mandate;
+use crate::mandate::{self, Mandate};
 use crate::vehicle::VerifiedVehicleState;
 use chrono::{DateTime, Duration, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+/// Trust context supplied by the caller to gate whose mandates are accepted.
+///
+/// There is no implicit default — callers must supply a `TrustAnchor` explicitly.
+/// Using `SelfSovereign` preserves the prior behavior (any self-consistent mandate
+/// accepted) but requires an explicit opt-in so the insecure mode is never the result
+/// of omission.
+///
+/// See ADR-0014 for the fail-explicit design rationale.
+#[non_exhaustive]
+pub enum TrustAnchor<'a> {
+    /// Accept any self-consistent mandate. The issuer is NOT checked against any
+    /// trusted key set. Use only when issuer trust is explicitly waived (e.g. local
+    /// testing, single-tenant deployments where key pinning is enforced elsewhere).
+    SelfSovereign,
+
+    /// The mandate's `issuer_pubkey` must match one of these raw 32-byte ed25519
+    /// keys. If the issuer is not present, `decide()` returns a DENY verdict with
+    /// policy rule `"issuer_untrusted: ..."`.
+    Roots(&'a [[u8; 32]]),
+
+    /// The mandate issuer is trusted via a delegation chain rather than directly.
+    ///
+    /// Validation order:
+    ///   1. `verify_chain(chain)` — signatures, TTLs, chain linkage.
+    ///   2. `chain[0].grantor_pubkey` must be in `trusted_roots`.
+    ///   3. `chain.last().grantee_did` must equal the mandate's `issuer_did`.
+    ///   4. `validate_mandate_against_authority(mandate, chain.last())` — scope check.
+    Chain {
+        /// Raw 32-byte ed25519 pubkeys accepted as chain roots.
+        trusted_roots: &'a [[u8; 32]],
+        /// Delegation chain from root (index 0) to issuer (last index).
+        chain: &'a [crate::authority::Delegation],
+    },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Decision {
@@ -113,6 +149,11 @@ pub struct Verdict {
 /// Uses logical normalization only — no filesystem access, no symlink resolution.
 /// When called through `enforce()`, the `path` param has already been resolved to
 /// a canonical real path before this function runs.
+///
+/// # Trust anchor (ADR-0014)
+/// `trust` declares whose mandates are accepted. There is no implicit default —
+/// callers must supply a `TrustAnchor` explicitly. Pass `&TrustAnchor::SelfSovereign`
+/// to replicate the prior open behavior (any self-consistent mandate accepted).
 pub fn decide<L: EnforceLedger>(
     mandate_cbor: &[u8],
     tool: &str,
@@ -120,6 +161,7 @@ pub fn decide<L: EnforceLedger>(
     ledger: &L,
     now: DateTime<Utc>,
     verified_state: Option<&VerifiedVehicleState>,
+    trust: &TrustAnchor<'_>,
 ) -> Result<Verdict, A2gError> {
     decide_core(
         mandate_cbor,
@@ -129,6 +171,7 @@ pub fn decide<L: EnforceLedger>(
         now,
         verified_state,
         false,
+        trust,
     )
 }
 
@@ -159,6 +202,7 @@ pub fn decide_with_approval<L: EnforceLedger>(
     verified_state: Option<&VerifiedVehicleState>,
     pending: &PendingApprovalBinding,
     grant: &hitl::ApprovalGrant,
+    trust: &TrustAnchor<'_>,
 ) -> Result<Verdict, A2gError> {
     // We need the core fields for make_verdict before calling decide_core.
     let params_hash = hex::encode(Sha256::digest(
@@ -237,6 +281,7 @@ pub fn decide_with_approval<L: EnforceLedger>(
         now,
         verified_state,
         true,
+        trust,
     )?;
 
     // Link Phase 2 receipt to Phase 1 receipt via parent_receipt_hash.
@@ -248,10 +293,60 @@ pub fn decide_with_approval<L: EnforceLedger>(
     Ok(verdict)
 }
 
+/// Verify that the mandate's issuer is trusted under the supplied `TrustAnchor`.
+///
+/// Called at Step 1.5 — after signature/self-consistency, before capability evaluation.
+/// Returns `Err(A2gError::IssuerUntrusted)` when the issuer is not in scope.
+fn check_issuer_trust(
+    trust: &TrustAnchor<'_>,
+    cbor_envelope: &CborMandate,
+    mandate: &Mandate,
+) -> Result<(), A2gError> {
+    match trust {
+        TrustAnchor::SelfSovereign => Ok(()),
+        TrustAnchor::Roots(roots) => {
+            let issuer_pk: &[u8] = cbor_envelope.issuer_pubkey.as_ref();
+            let arr: [u8; 32] = issuer_pk.try_into().map_err(|_| A2gError::InvalidKey)?;
+            if roots.iter().any(|r| r == &arr) {
+                Ok(())
+            } else {
+                Err(A2gError::IssuerUntrusted)
+            }
+        }
+        TrustAnchor::Chain {
+            trusted_roots,
+            chain,
+        } => {
+            crate::authority::verify_chain(chain)?;
+            let root = chain
+                .first()
+                .ok_or_else(|| A2gError::AuthorityChain("empty chain".to_string()))?;
+            let root_bytes = hex::decode(&root.grantor_pubkey)
+                .map_err(|e| A2gError::HexDecode(e.to_string()))?;
+            let root_arr: [u8; 32] = root_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| A2gError::InvalidKey)?;
+            if !trusted_roots.iter().any(|r| r == &root_arr) {
+                return Err(A2gError::IssuerUntrusted);
+            }
+            let leaf = chain
+                .last()
+                .ok_or_else(|| A2gError::AuthorityChain("empty chain".to_string()))?;
+            if leaf.grantee_did != mandate.mandate.issuer {
+                return Err(A2gError::IssuerUntrusted);
+            }
+            crate::authority::validate_mandate_against_authority(mandate, leaf)?;
+            Ok(())
+        }
+    }
+}
+
 /// Internal pipeline implementation shared by `decide()` and `decide_with_approval()`.
 ///
 /// `skip_escalation`: when `true`, Step 6 (escalation check) is bypassed.
 /// Set by `decide_with_approval()` after validating a grant.
+#[allow(clippy::too_many_arguments)]
 fn decide_core<L: EnforceLedger>(
     mandate_cbor: &[u8],
     tool: &str,
@@ -260,6 +355,7 @@ fn decide_core<L: EnforceLedger>(
     now: DateTime<Utc>,
     verified_state: Option<&VerifiedVehicleState>,
     skip_escalation: bool,
+    trust: &TrustAnchor<'_>,
 ) -> Result<Verdict, A2gError> {
     let params_hash = hex::encode(Sha256::digest(
         serde_json::to_string(params)
@@ -338,6 +434,15 @@ fn decide_core<L: EnforceLedger>(
         return Ok(make_verdict(
             Decision::Deny,
             &format!("mandate_invalid: {}", e),
+        ));
+    }
+
+    // ── Step 1.5: Issuer Trust Enforcement (ADR-0014) ──
+    // After self-consistency, before capability evaluation.
+    if let Err(e) = check_issuer_trust(trust, &cbor_envelope, &m) {
+        return Ok(make_verdict(
+            Decision::Deny,
+            &format!("issuer_untrusted: {}", e),
         ));
     }
 
@@ -642,6 +747,7 @@ pub fn enforce<L: EnforceLedger>(
     tool: &str,
     params: &serde_json::Value,
     ledger: &L,
+    trust: &TrustAnchor<'_>,
 ) -> Result<Verdict, A2gError> {
     let resolved_params = if let Some(raw_path) = params.get("path").and_then(|p| p.as_str()) {
         let resolved = resolve_path_for_enforce(raw_path)?;
@@ -664,6 +770,7 @@ pub fn enforce<L: EnforceLedger>(
         ledger,
         Utc::now(),
         Some(&verified),
+        trust,
     )
 }
 
@@ -1113,7 +1220,13 @@ mod tests {
         tampered[mid] = if tampered[mid] == 0x00 { 0xff } else { 0x00 };
         let db = TestLedger;
         let params: serde_json::Value = serde_json::from_str("{}").unwrap();
-        let result = enforce(&tampered, "execute", &params, &db);
+        let result = enforce(
+            &tampered,
+            "execute",
+            &params,
+            &db,
+            &TrustAnchor::SelfSovereign,
+        );
         // Tampered CBOR will either fail to parse or fail signature check
         if let Ok(v) = result {
             assert_eq!(v.decision, Decision::Deny);
@@ -1135,7 +1248,16 @@ mod tests {
         );
         let db = TestLedger;
         let params = serde_json::json!({"path": "/home/agent/workspace/data/test.txt"});
-        let result = decide(&signed, "read_file", &params, &db, Utc::now(), None).unwrap();
+        let result = decide(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            Utc::now(),
+            None,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Allow);
     }
 
@@ -1154,7 +1276,16 @@ mod tests {
         );
         let db = TestLedger;
         let params = serde_json::json!({"path": "/home/agent/workspace/data/test.txt"});
-        let result = decide(&signed, "read_file", &params, &db, Utc::now(), None).unwrap();
+        let result = decide(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            Utc::now(),
+            None,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Allow);
     }
 
@@ -1173,7 +1304,14 @@ mod tests {
         );
         let db = TestLedger;
         let params = serde_json::json!({"path": "/etc/passwd"});
-        let result = enforce(&signed, "read_file", &params, &db).unwrap();
+        let result = enforce(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Deny);
         assert!(result.policy_rule.contains("boundary_violation"));
     }
@@ -1186,7 +1324,16 @@ mod tests {
         let just_before = expires - chrono::Duration::seconds(1);
         let db = TestLedger;
         let params = serde_json::json!({"path": "workspace/file.txt"});
-        let result = decide(&signed, "read_file", &params, &db, just_before, None).unwrap();
+        let result = decide(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            just_before,
+            None,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Allow);
     }
 
@@ -1197,7 +1344,16 @@ mod tests {
         let expires: DateTime<Utc> = m.mandate.expires_at.parse().unwrap();
         let db = TestLedger;
         let params = serde_json::json!({});
-        let result = decide(&signed, "read_file", &params, &db, expires, None).unwrap();
+        let result = decide(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            expires,
+            None,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Expired);
     }
 
@@ -1209,7 +1365,16 @@ mod tests {
         let db = TestLedger;
         let params = serde_json::json!({});
         let one_hour_late = expires + chrono::Duration::hours(1);
-        let result = decide(&signed, "read_file", &params, &db, one_hour_late, None).unwrap();
+        let result = decide(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            one_hour_late,
+            None,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Expired);
         assert_eq!(result.policy_rule, "mandate_ttl_exceeded");
     }
@@ -1230,7 +1395,16 @@ mod tests {
         let db = TestLedger;
         let params = serde_json::json!({});
         let noon = Utc.with_ymd_and_hms(2030, 6, 1, 12, 0, 0).unwrap();
-        let result = decide(&signed, "read_file", &params, &db, noon, None).unwrap();
+        let result = decide(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            noon,
+            None,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Allow);
     }
 
@@ -1250,7 +1424,16 @@ mod tests {
         let db = TestLedger;
         let params = serde_json::json!({});
         let night = Utc.with_ymd_and_hms(2030, 6, 1, 2, 0, 0).unwrap();
-        let result = decide(&signed, "read_file", &params, &db, night, None).unwrap();
+        let result = decide(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            night,
+            None,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Deny);
         assert!(result.policy_rule.contains("jurisdiction_violation"));
     }
@@ -1271,7 +1454,16 @@ mod tests {
         let db = TestLedger;
         let params = serde_json::json!({});
         let just_after = Utc.with_ymd_and_hms(2030, 6, 1, 17, 1, 0).unwrap();
-        let result = decide(&signed, "read_file", &params, &db, just_after, None).unwrap();
+        let result = decide(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            just_after,
+            None,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Deny);
         assert!(result.policy_rule.contains("jurisdiction_violation"));
     }
@@ -1291,6 +1483,7 @@ mod tests {
             &db,
             Utc::now(),
             None,
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(result.decision, Decision::Deny);
@@ -1316,6 +1509,7 @@ mod tests {
             &db,
             Utc::now(),
             Some(&parked),
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(result.decision, Decision::Allow);
@@ -1340,6 +1534,7 @@ mod tests {
             &db,
             Utc::now(),
             Some(&moving),
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(result.decision, Decision::Deny);
@@ -1359,6 +1554,7 @@ mod tests {
             &db,
             Utc::now(),
             None, // Comfort: no state gating
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(result.decision, Decision::Allow);
@@ -1377,6 +1573,7 @@ mod tests {
             &db,
             Utc::now(),
             None, // No verified state → fail_safe() → DENY
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(result.decision, Decision::Deny);
@@ -1396,6 +1593,7 @@ mod tests {
             &db,
             Utc::now(),
             None,
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(result.decision, Decision::Allow);
@@ -1414,6 +1612,7 @@ mod tests {
             &db,
             Utc::now(),
             None,
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(result.decision, Decision::Deny);
@@ -1427,8 +1626,24 @@ mod tests {
         let db = TestLedger;
         let params = serde_json::json!({"path": "/etc/passwd"});
 
-        let via_enforce = enforce(&signed, "read_file", &params, &db).unwrap();
-        let via_decide = decide(&signed, "read_file", &params, &db, Utc::now(), None).unwrap();
+        let via_enforce = enforce(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
+        let via_decide = decide(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            Utc::now(),
+            None,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
 
         assert_eq!(via_enforce.decision, Decision::Deny);
         assert_eq!(via_decide.decision, Decision::Deny);
@@ -1463,7 +1678,14 @@ mod tests {
         let symlink_path = workspace.join("evil_link").to_str().unwrap().to_string();
         let params = serde_json::json!({"path": symlink_path});
 
-        let result = enforce(&signed, "read_file", &params, &db).unwrap();
+        let result = enforce(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Deny);
 
         let _ = std::fs::remove_dir_all(&tmpdir);
@@ -1501,7 +1723,14 @@ mod tests {
             .to_string();
         let params = serde_json::json!({"path": path_through_symdir});
 
-        let result = enforce(&signed, "read_file", &params, &db).unwrap();
+        let result = enforce(
+            &signed,
+            "read_file",
+            &params,
+            &db,
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(result.decision, Decision::Deny);
 
         let _ = std::fs::remove_dir_all(&tmpdir);
@@ -1530,6 +1759,7 @@ mod tests {
             &db,
             now,
             Some(&parked),
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(result.decision, Decision::PendingApproval);
@@ -1571,6 +1801,7 @@ mod tests {
             &db,
             now,
             Some(&parked),
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(v1.decision, Decision::PendingApproval);
@@ -1601,6 +1832,7 @@ mod tests {
             Some(&parked),
             &pending,
             &grant,
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(
@@ -1632,6 +1864,7 @@ mod tests {
             &db,
             now,
             Some(&parked),
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         let pending = v1.pending_approval.unwrap();
@@ -1660,6 +1893,7 @@ mod tests {
             Some(&parked),
             &pending,
             &grant,
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(v2.decision, Decision::Deny);
@@ -1690,6 +1924,7 @@ mod tests {
             &db,
             now,
             Some(&parked),
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         let pending = v1.pending_approval.unwrap();
@@ -1719,6 +1954,7 @@ mod tests {
             Some(&parked),
             &pending,
             &grant,
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(v2.decision, Decision::Deny);
@@ -1832,6 +2068,7 @@ mod tests {
             None,
             &binding,
             &grant,
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(
@@ -1868,7 +2105,16 @@ mod tests {
         let (m, _) = crate::mandate::parse_cbor_mandate_raw(&signed).unwrap();
         let expires: DateTime<Utc> = m.mandate.expires_at.parse().unwrap();
         let t1 = expires - chrono::Duration::hours(1);
-        let v1 = decide(&signed, "WINDOW_POS", &params, &db, t1, Some(&parked)).unwrap();
+        let v1 = decide(
+            &signed,
+            "WINDOW_POS",
+            &params,
+            &db,
+            t1,
+            Some(&parked),
+            &TrustAnchor::SelfSovereign,
+        )
+        .unwrap();
         assert_eq!(v1.decision, Decision::PendingApproval);
         let pending = v1.pending_approval.clone().unwrap();
 
@@ -1899,6 +2145,7 @@ mod tests {
             Some(&parked),
             &pending,
             &grant,
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(
@@ -1949,6 +2196,7 @@ mod tests {
             &db,
             now,
             Some(&verified),
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(
@@ -1986,6 +2234,7 @@ mod tests {
             &db,
             now,
             Some(&verified),
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(
@@ -2006,11 +2255,339 @@ mod tests {
             &db,
             Utc::now(),
             None,
+            &TrustAnchor::SelfSovereign,
         )
         .unwrap();
         assert_eq!(
             v.state_trust, "none",
             "None verified_state must record state_trust=none"
+        );
+    }
+
+    // ── ADR-0014: TrustAnchor enforcement tests ───────────────────────────────
+
+    /// Build a CBOR mandate and return both the bytes AND the issuer pubkey bytes.
+    fn build_cbor_mandate_with_pubkey(
+        agent_name: &str,
+        tools: &[&str],
+        ttl_hours: u64,
+    ) -> (Vec<u8>, [u8; 32]) {
+        let (agent_did, secret, _) = crate::identity::generate_agent_keypair();
+        let secret_bytes = hex::decode(&secret).unwrap();
+        let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
+        let vk = sk.verifying_key();
+
+        let cbor = build_cbor_mandate_with_signing_key_inner(
+            &agent_did, agent_name, tools, ttl_hours, &sk, &vk,
+        );
+        let pubkey_bytes: [u8; 32] = vk.to_bytes();
+        (cbor, pubkey_bytes)
+    }
+
+    /// Build a CBOR mandate using a caller-supplied signing key.
+    /// Returns the CBOR bytes; the issuer_did is derived from the key.
+    fn build_cbor_mandate_with_signing_key(
+        agent_name: &str,
+        tools: &[&str],
+        ttl_hours: u64,
+        sk: &ed25519_dalek::SigningKey,
+    ) -> Vec<u8> {
+        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
+        let vk = sk.verifying_key();
+        build_cbor_mandate_with_signing_key_inner(&agent_did, agent_name, tools, ttl_hours, sk, &vk)
+    }
+
+    fn build_cbor_mandate_with_signing_key_inner(
+        agent_did: &str,
+        agent_name: &str,
+        tools: &[&str],
+        ttl_hours: u64,
+        sk: &ed25519_dalek::SigningKey,
+        vk: &ed25519_dalek::VerifyingKey,
+    ) -> Vec<u8> {
+        use crate::cbor::{encode_canonical, CborMandate, MandateTbs};
+        use crate::mandate::capabilities_hash;
+        use ed25519_dalek::Signer;
+
+        let now = Utc::now();
+        let expires = now
+            .checked_add_signed(chrono::Duration::hours(ttl_hours as i64))
+            .unwrap_or(now);
+        let pubkey_bytes: [u8; 32] = vk.to_bytes();
+        let issuer_did = format!("did:a2g:{}", bs58::encode(pubkey_bytes).into_string());
+        let tools_owned: Vec<String> = tools.iter().map(|s| s.to_string()).collect();
+        let cap_hash_bytes = hex::decode(capabilities_hash(&tools_owned)).unwrap();
+
+        let tbs = MandateTbs {
+            tag: "MANDATE".to_string(),
+            agent_did: agent_did.to_string(),
+            issuer_did,
+            agent_name: agent_name.to_string(),
+            issued_at: now.to_rfc3339(),
+            expires_at: expires.to_rfc3339(),
+            proposal_hash: String::new(),
+            workspace_root: String::new(),
+            capabilities_hash: cap_hash_bytes.into(),
+            tools: tools_owned,
+            fs_read: vec![],
+            fs_write: vec![],
+            fs_deny: vec![],
+            net_allow: vec![],
+            net_deny: vec![],
+            cmd_allow: vec![],
+            cmd_deny: vec![],
+            max_calls_per_minute: 60,
+            max_file_size_bytes: 10_485_760,
+            max_output_tokens: 4096,
+            max_session_duration_sec: 3600,
+            deny_patterns: vec![],
+            redact_patterns: vec![],
+            max_output_length: 50_000,
+            region: String::new(),
+            regulatory_framework: String::new(),
+            environment: String::new(),
+            classification: String::new(),
+            operating_hours: String::new(),
+            escalate_tools: vec![],
+            escalate_paths: vec![],
+            escalate_hosts: vec![],
+            escalate_to: String::new(),
+        };
+
+        let tbs_bytes = encode_canonical(&tbs).unwrap();
+        let sig = sk.sign(&tbs_bytes);
+        let envelope = CborMandate {
+            tag: "MANDATE-V1".to_string(),
+            tbs: tbs_bytes.into(),
+            signature: sig.to_bytes().to_vec().into(),
+            issuer_pubkey: pubkey_bytes.to_vec().into(),
+        };
+        encode_canonical(&envelope).unwrap()
+    }
+
+    /// Attacker-minted mandate + TrustAnchor::Roots → DENY issuer_untrusted.
+    /// An adversary who generates their own keypair and signs a mandate cannot
+    /// get their mandate accepted when the caller pins specific trusted roots.
+    #[test]
+    fn test_attacker_minted_mandate_rejected_by_roots() {
+        let (attacker_cbor, _attacker_pk) =
+            build_cbor_mandate_with_pubkey("attacker-agent", &["read_file"], 24);
+
+        // Trusted roots hold a completely different key — NOT the attacker's key.
+        let trusted_key: [u8; 32] = [0xab; 32];
+        let roots: &[[u8; 32]] = &[trusted_key];
+        let trust = TrustAnchor::Roots(roots);
+
+        let db = TestLedger;
+        let v = decide(
+            &attacker_cbor,
+            "read_file",
+            &serde_json::json!({}),
+            &db,
+            Utc::now(),
+            None,
+            &trust,
+        )
+        .unwrap();
+
+        assert_eq!(
+            v.decision,
+            Decision::Deny,
+            "Attacker-minted mandate must be denied under Roots: {}",
+            v.policy_rule
+        );
+        assert!(
+            v.policy_rule.contains("issuer_untrusted"),
+            "policy rule must identify issuer_untrusted, got: {}",
+            v.policy_rule
+        );
+    }
+
+    /// Trusted issuer key in Roots → ALLOW.
+    #[test]
+    fn test_trusted_root_mandate_allowed_by_roots() {
+        let (cbor, issuer_pk) = build_cbor_mandate_with_pubkey("trusted-agent", &["read_file"], 24);
+
+        let roots: &[[u8; 32]] = &[issuer_pk];
+        let trust = TrustAnchor::Roots(roots);
+
+        let db = TestLedger;
+        let v = decide(
+            &cbor,
+            "read_file",
+            &serde_json::json!({}),
+            &db,
+            Utc::now(),
+            None,
+            &trust,
+        )
+        .unwrap();
+
+        assert_eq!(
+            v.decision,
+            Decision::Allow,
+            "Mandate from a key in Roots must be allowed: {}",
+            v.policy_rule
+        );
+    }
+
+    /// SelfSovereign explicitly accepts any self-consistent mandate,
+    /// including one not in any Roots set. The opt-in must be explicit.
+    #[test]
+    fn test_self_sovereign_accepts_any_self_consistent_mandate() {
+        let (cbor, _pk) = build_cbor_mandate_with_pubkey("any-agent", &["read_file"], 24);
+
+        let trust = TrustAnchor::SelfSovereign;
+
+        let db = TestLedger;
+        let v = decide(
+            &cbor,
+            "read_file",
+            &serde_json::json!({}),
+            &db,
+            Utc::now(),
+            None,
+            &trust,
+        )
+        .unwrap();
+
+        assert_eq!(
+            v.decision,
+            Decision::Allow,
+            "SelfSovereign must accept any self-consistent mandate: {}",
+            v.policy_rule
+        );
+    }
+
+    /// Forbidden domain fires BEFORE the issuer-trust check — even when using
+    /// Roots and the issuer is untrusted, the policy_rule identifies forbidden domain
+    /// rather than issuer_untrusted (forbidden is checked first).
+    #[test]
+    fn test_forbidden_fires_before_issuer_trust_check() {
+        let (cbor, _attacker_pk) = build_cbor_mandate_with_pubkey(
+            "attacker-agent",
+            &["vehicle.powertrain.start_engine"],
+            24,
+        );
+
+        // Trusted roots hold a different key → issuer would be untrusted,
+        // but the forbidden pre-check fires first.
+        let trusted_key: [u8; 32] = [0xab; 32];
+        let roots: &[[u8; 32]] = &[trusted_key];
+        let trust = TrustAnchor::Roots(roots);
+
+        let db = TestLedger;
+        let v = decide(
+            &cbor,
+            "vehicle.powertrain.start_engine",
+            &serde_json::json!({}),
+            &db,
+            Utc::now(),
+            None,
+            &trust,
+        )
+        .unwrap();
+
+        assert_eq!(v.decision, Decision::Deny);
+        assert!(
+            v.policy_rule.contains("vehicle_forbidden_domain"),
+            "forbidden fires before issuer check; expected vehicle_forbidden_domain, got: {}",
+            v.policy_rule
+        );
+    }
+
+    /// Authority-chain delegation: an issuer authorised via a Root → Issuer
+    /// delegation chain is accepted under TrustAnchor::Chain, reusing
+    /// validate_mandate_against_authority() inside check_issuer_trust().
+    #[test]
+    fn test_authority_chain_delegation_proceeds() {
+        use crate::authority::{
+            create_root_delegation, delegate, AuthorityLevel, AuthorityScope, Jurisdiction,
+        };
+
+        // Root authority keypair
+        let root_sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let root_sk_hex = hex::encode(root_sk.to_bytes());
+        let root_pk: [u8; 32] = root_sk.verifying_key().to_bytes();
+
+        // Root scope — allows read_file
+        let root_scope = AuthorityScope {
+            allowed_tools: vec!["read_file".to_string()],
+            max_ttl_hours: 48,
+            max_rate_limit: 120,
+            max_active_mandates: 10,
+            ..AuthorityScope::default()
+        };
+
+        // Root self-signed delegation
+        let root_del = create_root_delegation(
+            &root_sk_hex,
+            "test-root",
+            root_scope,
+            Jurisdiction::default(),
+            48,
+        )
+        .unwrap();
+
+        // Issuer keypair — will sign the mandate
+        let issuer_sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let issuer_sk_hex = hex::encode(issuer_sk.to_bytes());
+        let issuer_did = format!(
+            "did:a2g:{}",
+            bs58::encode(issuer_sk.verifying_key().to_bytes()).into_string()
+        );
+
+        // Child delegation: root → issuer (Department level, subset scope)
+        let issuer_scope = AuthorityScope {
+            allowed_tools: vec!["read_file".to_string()],
+            max_ttl_hours: 24,
+            max_rate_limit: 60,
+            max_active_mandates: 5,
+            ..AuthorityScope::default()
+        };
+        let child_del = delegate(
+            &root_sk_hex,
+            &root_del,
+            &issuer_did,
+            "test-issuer",
+            AuthorityLevel::Department,
+            issuer_scope,
+            Jurisdiction::default(),
+            24,
+        )
+        .unwrap();
+        let _ = issuer_sk_hex; // key used only for signing below
+
+        // Mandate signed by issuer — issuer_did derived from issuer_sk matches child_del.grantee_did
+        let mandate_cbor =
+            build_cbor_mandate_with_signing_key("chain-test-agent", &["read_file"], 24, &issuer_sk);
+
+        // TrustAnchor::Chain: root pubkey pinned; chain validates issuer via delegation
+        let trusted_roots: &[[u8; 32]] = &[root_pk];
+        let chain = [root_del, child_del];
+        let trust = TrustAnchor::Chain {
+            trusted_roots,
+            chain: &chain,
+        };
+
+        let db = TestLedger;
+        let v = decide(
+            &mandate_cbor,
+            "read_file",
+            &serde_json::json!({}),
+            &db,
+            Utc::now(),
+            None,
+            &trust,
+        )
+        .unwrap();
+
+        assert_eq!(
+            v.decision,
+            Decision::Allow,
+            "authority-chain delegation must produce ALLOW: {}",
+            v.policy_rule
         );
     }
 }

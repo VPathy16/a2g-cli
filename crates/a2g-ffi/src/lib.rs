@@ -177,6 +177,35 @@ pub struct A2gVerifiedStateHandle {
     state: VerifiedVehicleState,
 }
 
+// ── Trust anchor (ADR-0014) ───────────────────────────────────────────────────
+
+/// Owned representation of the trust anchor for FFI callers.
+enum TrustAnchorOwned {
+    SelfSovereign,
+    Roots(Vec<[u8; 32]>),
+}
+
+/// Opaque handle declaring which mandate issuers are accepted.
+///
+/// Obtain via `a2g_trust_anchor_self_sovereign` or `a2g_trust_anchor_roots`.
+/// Release with `a2g_trust_anchor_free`. Never dereference directly from C.
+///
+/// Passing NULL for the trust parameter to `a2g_decide` or
+/// `a2g_decide_with_approval` returns `A2G_DECISION_ERROR` immediately —
+/// there is no implicit default trust mode (fail-explicit, ADR-0014).
+pub struct A2gTrustAnchorHandle {
+    mode: TrustAnchorOwned,
+}
+
+impl A2gTrustAnchorHandle {
+    fn as_trust_anchor(&self) -> a2g_core::enforce::TrustAnchor<'_> {
+        match &self.mode {
+            TrustAnchorOwned::SelfSovereign => a2g_core::enforce::TrustAnchor::SelfSovereign,
+            TrustAnchorOwned::Roots(keys) => a2g_core::enforce::TrustAnchor::Roots(keys),
+        }
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn safe_cstring(s: &str) -> CString {
@@ -217,6 +246,70 @@ fn make_error_verdict() -> Box<A2gVerdictHandle> {
     A2gVerdictHandle::new(v)
 }
 
+// ── Trust anchor constructors (ADR-0014) ──────────────────────────────────────
+
+/// Create a `SelfSovereign` trust anchor: accepts any self-consistent mandate.
+///
+/// Use only when issuer trust is explicitly waived (e.g. local testing).
+/// This is an explicit opt-in — NOT the default. Passing NULL to `a2g_decide`
+/// returns `A2G_DECISION_ERROR`; this function is the deliberate alternative.
+///
+/// Returns a heap-allocated handle. Free with `a2g_trust_anchor_free`.
+///
+/// # Safety
+/// The returned pointer is always non-NULL. Free with `a2g_trust_anchor_free`.
+#[no_mangle]
+pub extern "C" fn a2g_trust_anchor_self_sovereign() -> *mut A2gTrustAnchorHandle {
+    Box::into_raw(Box::new(A2gTrustAnchorHandle {
+        mode: TrustAnchorOwned::SelfSovereign,
+    }))
+}
+
+/// Create a `Roots` trust anchor: mandate's `issuer_pubkey` must match one of the
+/// supplied 32-byte ed25519 public keys.
+///
+/// - `pubkeys_flat` — Pointer to `count * 32` contiguous bytes of ed25519 pubkeys.
+/// - `count`        — Number of 32-byte keys in `pubkeys_flat`.
+///
+/// Returns a heap-allocated handle, or NULL if `pubkeys_flat` is NULL or `count` is 0.
+/// Free with `a2g_trust_anchor_free`.
+///
+/// # Safety
+/// `pubkeys_flat` must be valid for `count * 32` bytes and must not be NULL when `count > 0`.
+#[no_mangle]
+pub unsafe extern "C" fn a2g_trust_anchor_roots(
+    pubkeys_flat: *const u8,
+    count: usize,
+) -> *mut A2gTrustAnchorHandle {
+    if pubkeys_flat.is_null() || count == 0 {
+        return std::ptr::null_mut();
+    }
+    let bytes = std::slice::from_raw_parts(pubkeys_flat, count.saturating_mul(32));
+    let roots: Vec<[u8; 32]> = bytes
+        .chunks_exact(32)
+        .filter_map(|c| c.try_into().ok())
+        .collect();
+    if roots.is_empty() {
+        return std::ptr::null_mut();
+    }
+    Box::into_raw(Box::new(A2gTrustAnchorHandle {
+        mode: TrustAnchorOwned::Roots(roots),
+    }))
+}
+
+/// Release a trust anchor handle previously obtained from `a2g_trust_anchor_self_sovereign`
+/// or `a2g_trust_anchor_roots`.
+///
+/// # Safety
+/// `handle` must be a valid non-freed pointer obtained from one of the above functions,
+/// or NULL (no-op).
+#[no_mangle]
+pub unsafe extern "C" fn a2g_trust_anchor_free(handle: *mut A2gTrustAnchorHandle) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle));
+    }
+}
+
 // ── Phase 1: a2g_decide ───────────────────────────────────────────────────────
 
 /// Evaluate a governance decision (Phase 1).
@@ -229,6 +322,10 @@ fn make_error_verdict() -> Box<A2gVerdictHandle> {
 ///   Pass `"{}"` for no parameters.
 /// - `state`            — Optional verified vehicle state handle, or NULL.
 ///   NULL triggers the fail-safe default (denies Sensitive tools).
+/// - `trust`            — Trust anchor handle (ADR-0014). **Must not be NULL.**
+///   NULL returns `A2G_DECISION_ERROR` immediately — there is no implicit default.
+///   Use `a2g_trust_anchor_self_sovereign()` or `a2g_trust_anchor_roots()` to obtain
+///   a handle and express your trust policy explicitly.
 ///
 /// # Returns
 /// An `A2gDecision` integer. On `A2G_DECISION_PENDING_APPROVAL` the binding is
@@ -241,6 +338,8 @@ fn make_error_verdict() -> Box<A2gVerdictHandle> {
 /// `mandate_cbor` must be valid for `mandate_cbor_len` bytes.
 /// `tool` and `params_json` must be valid NUL-terminated UTF-8 strings.
 /// `state` must be NULL or a valid non-freed handle.
+/// `trust` must be a valid non-freed handle obtained from `a2g_trust_anchor_*`
+///   functions, or NULL (returns `A2G_DECISION_ERROR`).
 /// `out_verdict` must be a valid non-null writable pointer.
 #[no_mangle]
 pub unsafe extern "C" fn a2g_decide(
@@ -249,8 +348,17 @@ pub unsafe extern "C" fn a2g_decide(
     tool: *const c_char,
     params_json: *const c_char,
     state: *const A2gVerifiedStateHandle,
+    trust: *const A2gTrustAnchorHandle,
     out_verdict: *mut *mut A2gVerdictHandle,
 ) -> A2gDecision {
+    // Fail-explicit: NULL trust is a programming error, not a default.
+    if trust.is_null() {
+        if !out_verdict.is_null() {
+            *out_verdict = Box::into_raw(make_error_verdict());
+        }
+        return A2gDecision::Error;
+    }
+
     let result = panic::catch_unwind(|| {
         if mandate_cbor.is_null() {
             return None;
@@ -266,8 +374,18 @@ pub unsafe extern "C" fn a2g_decide(
             Some(&(*state).state)
         };
 
+        let trust_anchor = (*trust).as_trust_anchor();
         let now = Utc::now();
-        let verdict = decide(mandate, tool_s, &params, &NoopLedger, now, verified).ok()?;
+        let verdict = decide(
+            mandate,
+            tool_s,
+            &params,
+            &NoopLedger,
+            now,
+            verified,
+            &trust_anchor,
+        )
+        .ok()?;
         Some(verdict)
     });
 
@@ -299,6 +417,8 @@ pub unsafe extern "C" fn a2g_decide(
 ///   Obtain with `a2g_verdict_binding_json`. **Do not modify** — any field
 ///   change invalidates the MAC and returns `A2G_DECISION_ERROR`.
 /// - `grant_json`       — JSON-serialised `ApprovalGrant` from the human approver.
+/// - `trust`            — Trust anchor handle (ADR-0014). Must not be NULL.
+///   Same handle used in Phase 1 is recommended.
 ///
 /// # Returns
 /// `A2G_DECISION_ALLOW` on success; `A2G_DECISION_DENY` on policy failure;
@@ -316,8 +436,17 @@ pub unsafe extern "C" fn a2g_decide_with_approval(
     state: *const A2gVerifiedStateHandle,
     binding_json: *const c_char,
     grant_json: *const c_char,
+    trust: *const A2gTrustAnchorHandle,
     out_verdict: *mut *mut A2gVerdictHandle,
 ) -> A2gDecision {
+    // Fail-explicit: NULL trust is a programming error, not a default.
+    if trust.is_null() {
+        if !out_verdict.is_null() {
+            *out_verdict = Box::into_raw(make_error_verdict());
+        }
+        return A2gDecision::Error;
+    }
+
     let result = panic::catch_unwind(|| {
         if mandate_cbor.is_null() {
             return None;
@@ -339,6 +468,7 @@ pub unsafe extern "C" fn a2g_decide_with_approval(
             Some(&(*state).state)
         };
 
+        let trust_anchor = (*trust).as_trust_anchor();
         let now = Utc::now();
         let verdict = decide_with_approval(
             mandate,
@@ -349,6 +479,7 @@ pub unsafe extern "C" fn a2g_decide_with_approval(
             verified,
             &pending,
             &grant,
+            &trust_anchor,
         )
         .ok()?;
         Some(verdict)
@@ -739,6 +870,7 @@ mod tests {
         params: &str,
         state: *const A2gVerifiedStateHandle,
     ) -> (A2gDecision, *mut A2gVerdictHandle) {
+        let trust = a2g_trust_anchor_self_sovereign();
         let t = CString::new(tool).unwrap();
         let p = CString::new(params).unwrap();
         let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
@@ -748,8 +880,10 @@ mod tests {
             t.as_ptr(),
             p.as_ptr(),
             state,
+            trust,
             &mut out,
         );
+        a2g_trust_anchor_free(trust);
         (d, out)
     }
 
@@ -828,6 +962,7 @@ mod tests {
     #[test]
     fn test_null_mandate_returns_error() {
         unsafe {
+            let trust = a2g_trust_anchor_self_sovereign();
             let t = CString::new("read_file").unwrap();
             let p = CString::new("{}").unwrap();
             let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
@@ -837,9 +972,32 @@ mod tests {
                 t.as_ptr(),
                 p.as_ptr(),
                 std::ptr::null(),
+                trust,
                 &mut out,
             );
             assert_eq!(d, A2gDecision::Error);
+            assert!(!out.is_null());
+            a2g_verdict_free(out);
+            a2g_trust_anchor_free(trust);
+        }
+    }
+
+    #[test]
+    fn test_null_trust_returns_error() {
+        unsafe {
+            let t = CString::new("read_file").unwrap();
+            let p = CString::new("{}").unwrap();
+            let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
+            let d = a2g_decide(
+                std::ptr::null(),
+                0,
+                t.as_ptr(),
+                p.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(), // NULL trust → Error (fail-explicit, ADR-0014)
+                &mut out,
+            );
+            assert_eq!(d, A2gDecision::Error, "NULL trust must return Error");
             assert!(!out.is_null());
             a2g_verdict_free(out);
         }
@@ -910,6 +1068,7 @@ mod tests {
             let params_c = CString::new("{}").unwrap();
             let binding_c = CString::new(binding_json).unwrap();
             let grant_c = CString::new(grant_json).unwrap();
+            let trust2 = a2g_trust_anchor_self_sovereign();
             let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
             let d2 = a2g_decide_with_approval(
                 mandate.as_ptr(),
@@ -919,8 +1078,10 @@ mod tests {
                 state,
                 binding_c.as_ptr(),
                 grant_c.as_ptr(),
+                trust2,
                 &mut out,
             );
+            a2g_trust_anchor_free(trust2);
             assert_eq!(
                 d2,
                 A2gDecision::Allow,
@@ -968,6 +1129,7 @@ mod tests {
             let binding_c = CString::new(tampered).unwrap();
             // Grant doesn't matter — MAC check fires first
             let grant_c = CString::new("{}").unwrap();
+            let trust = a2g_trust_anchor_self_sovereign();
             let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
             let d = a2g_decide_with_approval(
                 mandate.as_ptr(),
@@ -977,8 +1139,10 @@ mod tests {
                 state,
                 binding_c.as_ptr(),
                 grant_c.as_ptr(),
+                trust,
                 &mut out,
             );
+            a2g_trust_anchor_free(trust);
             assert_eq!(
                 d,
                 A2gDecision::Error,
@@ -1005,6 +1169,7 @@ mod tests {
             let params_c = CString::new("{}").unwrap();
             let binding_c = CString::new(tampered).unwrap();
             let grant_c = CString::new("{}").unwrap();
+            let trust = a2g_trust_anchor_self_sovereign();
             let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
             let d = a2g_decide_with_approval(
                 mandate.as_ptr(),
@@ -1014,8 +1179,10 @@ mod tests {
                 state,
                 binding_c.as_ptr(),
                 grant_c.as_ptr(),
+                trust,
                 &mut out,
             );
+            a2g_trust_anchor_free(trust);
             assert_eq!(
                 d,
                 A2gDecision::Error,

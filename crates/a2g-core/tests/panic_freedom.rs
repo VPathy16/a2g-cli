@@ -13,7 +13,7 @@
 //! Proptest automatically shrinks failing cases and re-runs them as regression
 //! tests (saved to `proptest-regressions/`).
 
-use a2g_core::enforce::{decide, Decision};
+use a2g_core::enforce::{decide, Decision, TrustAnchor};
 use a2g_core::ledger::EnforceLedger;
 use a2g_core::vehicle::{Actor, Gear, VehicleState, VerifiedVehicleState};
 use chrono::{Duration, Utc};
@@ -131,7 +131,7 @@ proptest! {
     ) {
         let params = serde_json::from_str(&params_str)
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-        let result = decide(mandate_str.as_bytes(), &tool, &params, &NoopLedger, Utc::now(), None);
+        let result = decide(mandate_str.as_bytes(), &tool, &params, &NoopLedger, Utc::now(), None, &TrustAnchor::SelfSovereign);
         err_resolves_to_deny(result);
     }
 
@@ -155,7 +155,7 @@ proptest! {
         let vs = VerifiedVehicleState::from_operator_trusted(state);
         let mandate = valid_mandate(&["read_file"]);
         let params = serde_json::json!({});
-        let result = decide(&mandate, "read_file", &params, &NoopLedger, Utc::now(), Some(&vs));
+        let result = decide(&mandate, "read_file", &params, &NoopLedger, Utc::now(), Some(&vs), &TrustAnchor::SelfSovereign);
         err_resolves_to_deny(result);
     }
 
@@ -176,7 +176,7 @@ proptest! {
     ) {
         let mandate = valid_mandate(&["read_file"]);
         let params = serde_json::json!({});
-        let result = decide(&mandate, &tool, &params, &NoopLedger, Utc::now(), None);
+        let result = decide(&mandate, &tool, &params, &NoopLedger, Utc::now(), None, &TrustAnchor::SelfSovereign);
         err_resolves_to_deny(result);
     }
 
@@ -193,7 +193,7 @@ proptest! {
             "url":     url_val,
             "command": cmd_val,
         });
-        let result = decide(&mandate, "read_file", &params, &NoopLedger, Utc::now(), None);
+        let result = decide(&mandate, "read_file", &params, &NoopLedger, Utc::now(), None, &TrustAnchor::SelfSovereign);
         err_resolves_to_deny(result);
     }
 
@@ -207,7 +207,7 @@ proptest! {
         let mandate = valid_mandate(&forbidden);
         let params = serde_json::json!({ "extra": extra_garbage });
         for tool in &forbidden {
-            let result = decide(&mandate, tool, &params, &NoopLedger, Utc::now(), None);
+            let result = decide(&mandate, tool, &params, &NoopLedger, Utc::now(), None, &TrustAnchor::SelfSovereign);
             if let Ok(v) = result {
                 prop_assert_eq!(
                     v.decision, Decision::Deny,
@@ -225,7 +225,7 @@ proptest! {
         let tool = format!("read_{}", tool_suffix);
         let mandate = valid_mandate(&[&tool]);
         let params = serde_json::json!({});
-        let result = decide(&mandate, &tool, &params, &NoopLedger, Utc::now(), None);
+        let result = decide(&mandate, &tool, &params, &NoopLedger, Utc::now(), None, &TrustAnchor::SelfSovereign);
         match result {
             Ok(v) => prop_assert_eq!(
                 v.decision, Decision::Allow,
@@ -241,7 +241,15 @@ proptest! {
 #[test]
 fn empty_mandate_is_not_panic() {
     let params = serde_json::json!({});
-    let result = decide(b"", "read_file", &params, &NoopLedger, Utc::now(), None);
+    let result = decide(
+        b"",
+        "read_file",
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        None,
+        &TrustAnchor::SelfSovereign,
+    );
     assert!(result.is_err(), "empty mandate must return Err, not panic");
 }
 
@@ -255,6 +263,7 @@ fn null_bytes_in_mandate_not_panic() {
         &NoopLedger,
         Utc::now(),
         None,
+        &TrustAnchor::SelfSovereign,
     );
     assert!(result.is_err(), "null-byte mandate must return Err");
 }
@@ -310,6 +319,7 @@ fn valid_speed_parked_produces_integer_verdict() {
         &NoopLedger,
         Utc::now(),
         Some(&vs),
+        &TrustAnchor::SelfSovereign,
     );
     assert!(
         result.is_ok(),
@@ -337,6 +347,7 @@ fn moving_speed_denies_sensitive_in_integer_space() {
         &NoopLedger,
         Utc::now(),
         Some(&vs),
+        &TrustAnchor::SelfSovereign,
     );
     assert!(result.is_ok());
     let v = result.unwrap();
@@ -349,7 +360,15 @@ fn extremely_long_tool_name_not_panic() {
     let mandate = valid_mandate(&["read_file"]);
     let tool = "a".repeat(100_000);
     let params = serde_json::json!({});
-    let result = decide(&mandate, &tool, &params, &NoopLedger, Utc::now(), None);
+    let result = decide(
+        &mandate,
+        &tool,
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        None,
+        &TrustAnchor::SelfSovereign,
+    );
     // Must not panic — returns Ok(Deny) or Err
     err_resolves_to_deny(result);
 }
@@ -366,6 +385,7 @@ fn internal_error_resolves_to_deny_at_ffi_boundary() {
         &NoopLedger,
         Utc::now(),
         None,
+        &TrustAnchor::SelfSovereign,
     );
     assert!(result.is_err(), "invalid mandate bytes must Err");
     // The FFI shim converts this Err to A2G_DECISION_ERROR which is treated as DENY.

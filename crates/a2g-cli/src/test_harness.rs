@@ -180,7 +180,13 @@ fn run_single_test(test: &PolicyTest, ledger_path: &Path) -> TestResult {
     };
 
     // Run enforcement
-    match enforce::enforce(&mandate_cbor, &test.tool, &params, &db) {
+    match enforce::enforce(
+        &mandate_cbor,
+        &test.tool,
+        &params,
+        &db,
+        &enforce::TrustAnchor::SelfSovereign,
+    ) {
         Ok(verdict) => {
             let actual_decision = format!("{}", verdict.decision);
             let actual_rule = verdict.policy_rule.clone();

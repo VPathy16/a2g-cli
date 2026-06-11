@@ -25,9 +25,10 @@
 
 /* Use the built-in test mandate helper to obtain signed CBOR bytes. */
 
-static void test_comfort_allow(const uint8_t *cbor, uintptr_t cbor_len) {
+static void test_comfort_allow(const uint8_t *cbor, uintptr_t cbor_len,
+                               A2gTrustAnchorHandle *trust) {
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(cbor, cbor_len, "read_file", "{}", NULL, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "read_file", "{}", NULL, trust, &verdict);
 
     assert(d == A2G_DECISION_ALLOW && "Comfort tool read_file must be ALLOW");
     assert(verdict != NULL);
@@ -40,39 +41,51 @@ static void test_comfort_allow(const uint8_t *cbor, uintptr_t cbor_len) {
     a2g_verdict_free(verdict);
 }
 
-static void test_forbidden_deny(const uint8_t *cbor, uintptr_t cbor_len) {
+static void test_forbidden_deny(const uint8_t *cbor, uintptr_t cbor_len,
+                                A2gTrustAnchorHandle *trust) {
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(cbor, cbor_len, "delete_all_data", "{}", NULL, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "delete_all_data", "{}", NULL, trust, &verdict);
 
-    assert(d == A2G_DECISION_DENY && "Forbidden tool delete_all_data must be DENY");
+    assert(d == A2G_DECISION_DENY && "Unknown tool delete_all_data must be DENY");
     assert(verdict != NULL);
     assert(a2g_verdict_decision(verdict) == A2G_DECISION_DENY);
 
-    printf("  [PASS] forbidden DENY\n");
+    printf("  [PASS] deny (unknown tool)\n");
     a2g_verdict_free(verdict);
 }
 
-static void test_operator_trusted_state_trust(const uint8_t *cbor, uintptr_t cbor_len) {
+static void test_operator_trusted_state_trust(const uint8_t *cbor, uintptr_t cbor_len,
+                                              A2gTrustAnchorHandle *trust) {
     /* Parked (gear=0), Driver (actor=0), 0 km/h — operator trusted. */
     A2gVerifiedStateHandle *state = a2g_verified_state_operator_trusted(0.0, 0, 0);
     assert(state != NULL && "operator_trusted state creation must succeed");
 
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(cbor, cbor_len, "read_file", "{}", state, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "read_file", "{}", state, trust, &verdict);
 
     assert(d == A2G_DECISION_ALLOW);
-    const char *trust = a2g_verdict_state_trust(verdict);
-    assert(trust != NULL);
-    assert(strcmp(trust, "operator_trusted") == 0 && "state_trust must be operator_trusted");
+    const char *state_trust = a2g_verdict_state_trust(verdict);
+    assert(state_trust != NULL);
+    assert(strcmp(state_trust, "operator_trusted") == 0 && "state_trust must be operator_trusted");
 
-    printf("  [PASS] operator_trusted state_trust=%s\n", trust);
+    printf("  [PASS] operator_trusted state_trust=%s\n", state_trust);
     a2g_verdict_free(verdict);
     a2g_verified_state_free(state);
 }
 
-static void test_null_mandate_returns_error(void) {
+static void test_null_trust_returns_error(const uint8_t *cbor, uintptr_t cbor_len) {
+    /* NULL trust → A2G_DECISION_ERROR (fail-explicit, ADR-0014). */
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(NULL, 0, "read_file", "{}", NULL, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "read_file", "{}", NULL, NULL, &verdict);
+    assert(d == A2G_DECISION_ERROR && "NULL trust must return ERROR (fail-explicit)");
+    assert(verdict != NULL);
+    a2g_verdict_free(verdict);
+    printf("  [PASS] NULL trust → ERROR (fail-explicit)\n");
+}
+
+static void test_null_mandate_returns_error(A2gTrustAnchorHandle *trust) {
+    A2gVerdictHandle *verdict = NULL;
+    A2gDecision d = a2g_decide(NULL, 0, "read_file", "{}", NULL, trust, &verdict);
     assert(d == A2G_DECISION_ERROR && "NULL mandate must return ERROR");
     assert(verdict != NULL);
     a2g_verdict_free(verdict);
@@ -97,12 +110,19 @@ int main(void) {
     }
     printf("  mandate obtained (%zu bytes)\n", (size_t)cbor_len);
 
-    test_comfort_allow(cbor, cbor_len);
-    test_forbidden_deny(cbor, cbor_len);
-    test_operator_trusted_state_trust(cbor, cbor_len);
-    test_null_mandate_returns_error();
+    /* Explicit SelfSovereign trust anchor (ADR-0014). */
+    A2gTrustAnchorHandle *trust = a2g_trust_anchor_self_sovereign();
+    assert(trust != NULL && "a2g_trust_anchor_self_sovereign must return non-NULL");
+    printf("  trust anchor created (SelfSovereign)\n");
+
+    test_comfort_allow(cbor, cbor_len, trust);
+    test_forbidden_deny(cbor, cbor_len, trust);
+    test_operator_trusted_state_trust(cbor, cbor_len, trust);
+    test_null_trust_returns_error(cbor, cbor_len);
+    test_null_mandate_returns_error(trust);
     test_invalid_gear_returns_null();
 
+    a2g_trust_anchor_free(trust);
     a2g_cbor_free(cbor, cbor_len);
 
     printf("All smoke tests passed.\n");

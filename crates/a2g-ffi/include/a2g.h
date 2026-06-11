@@ -22,6 +22,16 @@ enum A2gDecision {
 };
 typedef int32_t A2gDecision;
 
+// Opaque handle declaring which mandate issuers are accepted.
+//
+// Obtain via `a2g_trust_anchor_self_sovereign` or `a2g_trust_anchor_roots`.
+// Release with `a2g_trust_anchor_free`. Never dereference directly from C.
+//
+// Passing NULL for the trust parameter to `a2g_decide` or
+// `a2g_decide_with_approval` returns `A2G_DECISION_ERROR` immediately —
+// there is no implicit default trust mode (fail-explicit, ADR-0014).
+typedef struct A2gTrustAnchorHandle A2gTrustAnchorHandle;
+
 // Opaque handle holding a `Verdict` returned by a decision function.
 //
 // Obtain via `a2g_decide` or `a2g_decide_with_approval`.
@@ -34,6 +44,39 @@ typedef struct A2gVerdictHandle A2gVerdictHandle;
 // Release with `a2g_verified_state_free`. Never dereference directly from C.
 typedef struct A2gVerifiedStateHandle A2gVerifiedStateHandle;
 
+// Create a `SelfSovereign` trust anchor: accepts any self-consistent mandate.
+//
+// Use only when issuer trust is explicitly waived (e.g. local testing).
+// This is an explicit opt-in — NOT the default. Passing NULL to `a2g_decide`
+// returns `A2G_DECISION_ERROR`; this function is the deliberate alternative.
+//
+// Returns a heap-allocated handle. Free with `a2g_trust_anchor_free`.
+//
+// # Safety
+// The returned pointer is always non-NULL. Free with `a2g_trust_anchor_free`.
+struct A2gTrustAnchorHandle *a2g_trust_anchor_self_sovereign(void);
+
+// Create a `Roots` trust anchor: mandate's `issuer_pubkey` must match one of the
+// supplied 32-byte ed25519 public keys.
+//
+// - `pubkeys_flat` — Pointer to `count * 32` contiguous bytes of ed25519 pubkeys.
+// - `count`        — Number of 32-byte keys in `pubkeys_flat`.
+//
+// Returns a heap-allocated handle, or NULL if `pubkeys_flat` is NULL or `count` is 0.
+// Free with `a2g_trust_anchor_free`.
+//
+// # Safety
+// `pubkeys_flat` must be valid for `count * 32` bytes and must not be NULL when `count > 0`.
+struct A2gTrustAnchorHandle *a2g_trust_anchor_roots(const uint8_t *pubkeys_flat, uintptr_t count);
+
+// Release a trust anchor handle previously obtained from `a2g_trust_anchor_self_sovereign`
+// or `a2g_trust_anchor_roots`.
+//
+// # Safety
+// `handle` must be a valid non-freed pointer obtained from one of the above functions,
+// or NULL (no-op).
+void a2g_trust_anchor_free(struct A2gTrustAnchorHandle *handle);
+
 // Evaluate a governance decision (Phase 1).
 //
 // # Parameters
@@ -44,6 +87,10 @@ typedef struct A2gVerifiedStateHandle A2gVerifiedStateHandle;
 //   Pass `"{}"` for no parameters.
 // - `state`            — Optional verified vehicle state handle, or NULL.
 //   NULL triggers the fail-safe default (denies Sensitive tools).
+// - `trust`            — Trust anchor handle (ADR-0014). **Must not be NULL.**
+//   NULL returns `A2G_DECISION_ERROR` immediately — there is no implicit default.
+//   Use `a2g_trust_anchor_self_sovereign()` or `a2g_trust_anchor_roots()` to obtain
+//   a handle and express your trust policy explicitly.
 //
 // # Returns
 // An `A2gDecision` integer. On `A2G_DECISION_PENDING_APPROVAL` the binding is
@@ -56,12 +103,15 @@ typedef struct A2gVerifiedStateHandle A2gVerifiedStateHandle;
 // `mandate_cbor` must be valid for `mandate_cbor_len` bytes.
 // `tool` and `params_json` must be valid NUL-terminated UTF-8 strings.
 // `state` must be NULL or a valid non-freed handle.
+// `trust` must be a valid non-freed handle obtained from `a2g_trust_anchor_*`
+//   functions, or NULL (returns `A2G_DECISION_ERROR`).
 // `out_verdict` must be a valid non-null writable pointer.
 A2gDecision a2g_decide(const uint8_t *mandate_cbor,
                        uintptr_t mandate_cbor_len,
                        const char *tool,
                        const char *params_json,
                        const struct A2gVerifiedStateHandle *state,
+                       const struct A2gTrustAnchorHandle *trust,
                        struct A2gVerdictHandle **out_verdict);
 
 // Evaluate a governance decision with a pre-validated human approval (Phase 2).
@@ -76,6 +126,8 @@ A2gDecision a2g_decide(const uint8_t *mandate_cbor,
 //   Obtain with `a2g_verdict_binding_json`. **Do not modify** — any field
 //   change invalidates the MAC and returns `A2G_DECISION_ERROR`.
 // - `grant_json`       — JSON-serialised `ApprovalGrant` from the human approver.
+// - `trust`            — Trust anchor handle (ADR-0014). Must not be NULL.
+//   Same handle used in Phase 1 is recommended.
 //
 // # Returns
 // `A2G_DECISION_ALLOW` on success; `A2G_DECISION_DENY` on policy failure;
@@ -91,6 +143,7 @@ A2gDecision a2g_decide_with_approval(const uint8_t *mandate_cbor,
                                      const struct A2gVerifiedStateHandle *state,
                                      const char *binding_json,
                                      const char *grant_json,
+                                     const struct A2gTrustAnchorHandle *trust,
                                      struct A2gVerdictHandle **out_verdict);
 
 // Returns the `A2gDecision` stored in the handle.

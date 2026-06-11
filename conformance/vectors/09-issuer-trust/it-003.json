@@ -1,0 +1,37 @@
+{
+  "id": "it-003",
+  "spec_ref": "ADR-0014 §3",
+  "category": "issuer-trust",
+  "description": "Mandate whose issuer key is in the Roots trust set is allowed",
+  "known_failing": false,
+  "known_failing_reason": null,
+  "input": {
+    "mandate_capabilities": ["read_file"],
+    "mandate_escalate_tools": [],
+    "mandate_expires_in_hours": 24,
+    "mandate_bad_signature": false,
+    "mandate_use_spec_signing": false,
+    "mandate_workspace_root": null,
+    "mandate_operating_hours": null,
+    "mandate_rate_limit": 120,
+    "mandate_fs_deny": [],
+    "mandate_fs_read": [],
+    "mandate_fs_write": [],
+    "capability": "read_file",
+    "params": {},
+    "state_speed_kph": null,
+    "state_gear": null,
+    "state_actor": null,
+    "state_trust": null,
+    "clock_offset_seconds": 0,
+    "phase2_grant_type": null,
+    "gateway_test_type": null,
+    "trust_mode": "roots_match"
+  },
+  "expected": {
+    "verdict": "ALLOW",
+    "policy_rule_contains": null,
+    "gateway_enforced": null,
+    "gateway_refused_reason_contains": null
+  }
+}

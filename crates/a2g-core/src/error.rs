@@ -64,6 +64,12 @@ pub enum A2gError {
     /// An `EnforceLedger` implementation returned an error.
     LedgerError(String),
 
+    // ── Trust anchor ──────────────────────────────────────────────────────────
+    /// Mandate issuer is not in the caller-supplied trust anchor.
+    /// Returned by `check_issuer_trust` when `TrustAnchor::Roots` or
+    /// `TrustAnchor::Chain` is used and the issuer does not match.
+    IssuerUntrusted,
+
     // ── Catch-all ─────────────────────────────────────────────────────────────
     /// Internal invariant violated.
     Internal(String),
@@ -91,6 +97,7 @@ impl core::fmt::Display for A2gError {
             A2gError::AttestationInvalidKey => write!(f, "attestation key is invalid"),
             A2gError::AttestationStaleNonce => write!(f, "attestation nonce mismatch"),
             A2gError::AttestationStale => write!(f, "attested state is too old"),
+            A2gError::IssuerUntrusted => write!(f, "issuer not in configured trust roots"),
             A2gError::PathError(s) => write!(f, "path error: {s}"),
             A2gError::LedgerError(s) => write!(f, "ledger error: {s}"),
             A2gError::Internal(s) => write!(f, "internal error: {s}"),

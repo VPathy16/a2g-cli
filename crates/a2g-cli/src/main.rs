@@ -873,20 +873,23 @@ fn cmd_enforce(
     let mut authority_level_val = String::new();
     let mut scope_hash_val = String::new();
 
-    // AUTHORITY CHAIN VALIDATION (Fix 2)
+    // Declared here so the delegation chain outlives the TrustAnchor borrow below.
+    let mut chain: Vec<authority::Delegation> = Vec::new();
+    let mut chain_root_pk: Option<[u8; 32]> = None;
+
+    // AUTHORITY CHAIN VALIDATION
     if let Some(chain_str) = authority_chain {
         // Parse comma-separated delegation file paths
         let delegation_paths: Vec<&str> = chain_str.split(',').map(|s| s.trim()).collect();
 
         // Load each delegation JSON
-        let mut chain: Vec<authority::Delegation> = Vec::new();
         for path in delegation_paths {
             let delegation_json = std::fs::read_to_string(path)?;
             let delegation: authority::Delegation = serde_json::from_str(&delegation_json)?;
             chain.push(delegation);
         }
 
-        // Check each delegation for revocation
+        // Check each delegation for revocation (ledger concern — stays CLI-side)
         for d in &chain {
             if db.is_delegation_revoked(&d.delegation_hash)? {
                 if output_format == "json" {
@@ -908,64 +911,29 @@ fn cmd_enforce(
             }
         }
 
-        // Verify the chain
+        // Verify chain structure and signatures (for informational output only).
+        // Authority-scope and issuer-trust enforcement is delegated to enforce() via
+        // TrustAnchor::Chain (ADR-0014 Step 1.5) — not duplicated here.
         let chain_validation = authority::verify_chain(&chain)?;
 
-        if !chain_validation.valid {
-            if output_format == "json" {
-                let output = serde_json::json!({
-                    "decision": "DENY",
-                    "reason": "authority chain validation failed",
-                    "detail": chain_validation.reason,
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            } else {
-                println!("DENY ✗");
-                println!("  reason: authority chain validation failed");
-                println!("  detail: {}", chain_validation.reason);
+        // Extract the root pubkey for the trust anchor.
+        if let Some(root) = chain.first() {
+            let root_bytes = hex::decode(&root.grantor_pubkey)?;
+            if let Ok(arr) = <[u8; 32]>::try_from(root_bytes.as_slice()) {
+                chain_root_pk = Some(arr);
             }
-            std::process::exit(1);
-        }
-
-        // Get the leaf delegation for scope validation
-        let leaf_delegation = chain.last().ok_or("authority chain is empty")?;
-
-        // Decode mandate (without full sig verification) to validate authority scope
-        let (decoded_mandate, _) =
-            mandate::parse_cbor_mandate_raw(&mandate_cbor).map_err(|e| e.to_string())?;
-
-        // Validate mandate against authority scope
-        if let Err(e) =
-            authority::validate_mandate_against_authority(&decoded_mandate, leaf_delegation)
-        {
-            if output_format == "json" {
-                let output = serde_json::json!({
-                    "decision": "DENY",
-                    "reason": "authority scope violation",
-                    "detail": e.to_string(),
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            } else {
-                println!("DENY ✗");
-                println!("  reason: authority scope violation");
-                println!("  detail: {}", e);
-            }
-            std::process::exit(1);
         }
 
         // Phase 2: Compute delegation chain hash and authority lineage
+        let leaf_delegation = chain.last().ok_or("authority chain is empty")?;
         let chain_hash_input: String = chain
             .iter()
             .map(|d| d.delegation_hash.as_str())
             .collect::<Vec<_>>()
             .join(":");
         delegation_chain_hash_val = hex::encode(Sha256::digest(chain_hash_input.as_bytes()));
-
-        // Extract issuer and authority level
         issuer_did_val = leaf_delegation.grantor_did.clone();
         authority_level_val = leaf_delegation.level.to_string();
-
-        // Compute effective scope hash
         let effective_scope_str = format!("{:?}", chain_validation.effective_scope);
         scope_hash_val = hex::encode(Sha256::digest(effective_scope_str.as_bytes()));
 
@@ -986,8 +954,22 @@ fn cmd_enforce(
         }
     }
 
+    // Build trust anchor (ADR-0014).
+    // When a delegation chain is present, TrustAnchor::Chain enforces issuer-trust
+    // and authority-scope natively inside enforce() at Step 1.5.
+    // Without a chain the caller-supplied mandate is accepted as-is
+    // (SelfSovereign — explicit opt-in, not the omitted default).
+    let roots_storage: Option<Vec<[u8; 32]>> = chain_root_pk.map(|pk| vec![pk]);
+    let trust_anchor: enforce::TrustAnchor<'_> = match &roots_storage {
+        Some(roots) => enforce::TrustAnchor::Chain {
+            trusted_roots: roots.as_slice(),
+            chain: &chain,
+        },
+        None => enforce::TrustAnchor::SelfSovereign,
+    };
+
     // Run enforcement
-    let mut verdict = enforce::enforce(&mandate_cbor, tool, &params, &db)?;
+    let mut verdict = enforce::enforce(&mandate_cbor, tool, &params, &db, &trust_anchor)?;
 
     // Phase 2: Set authority lineage on verdict
     verdict.delegation_chain_hash = delegation_chain_hash_val;
