@@ -2282,17 +2282,50 @@ mod tests {
         let sk = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
         let vk = sk.verifying_key();
 
+        let cbor = build_cbor_mandate_with_signing_key_inner(
+            &agent_did, agent_name, tools, ttl_hours, &sk, &vk,
+        );
+        let pubkey_bytes: [u8; 32] = vk.to_bytes();
+        (cbor, pubkey_bytes)
+    }
+
+    /// Build a CBOR mandate using a caller-supplied signing key.
+    /// Returns the CBOR bytes; the issuer_did is derived from the key.
+    fn build_cbor_mandate_with_signing_key(
+        agent_name: &str,
+        tools: &[&str],
+        ttl_hours: u64,
+        sk: &ed25519_dalek::SigningKey,
+    ) -> Vec<u8> {
+        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
+        let vk = sk.verifying_key();
+        build_cbor_mandate_with_signing_key_inner(&agent_did, agent_name, tools, ttl_hours, sk, &vk)
+    }
+
+    fn build_cbor_mandate_with_signing_key_inner(
+        agent_did: &str,
+        agent_name: &str,
+        tools: &[&str],
+        ttl_hours: u64,
+        sk: &ed25519_dalek::SigningKey,
+        vk: &ed25519_dalek::VerifyingKey,
+    ) -> Vec<u8> {
+        use crate::cbor::{encode_canonical, CborMandate, MandateTbs};
+        use crate::mandate::capabilities_hash;
+        use ed25519_dalek::Signer;
+
         let now = Utc::now();
         let expires = now
             .checked_add_signed(chrono::Duration::hours(ttl_hours as i64))
             .unwrap_or(now);
-        let issuer_did = format!("did:a2g:{}", bs58::encode(vk.to_bytes()).into_string());
+        let pubkey_bytes: [u8; 32] = vk.to_bytes();
+        let issuer_did = format!("did:a2g:{}", bs58::encode(pubkey_bytes).into_string());
         let tools_owned: Vec<String> = tools.iter().map(|s| s.to_string()).collect();
         let cap_hash_bytes = hex::decode(capabilities_hash(&tools_owned)).unwrap();
 
         let tbs = MandateTbs {
             tag: "MANDATE".to_string(),
-            agent_did,
+            agent_did: agent_did.to_string(),
             issuer_did,
             agent_name: agent_name.to_string(),
             issued_at: now.to_rfc3339(),
@@ -2328,15 +2361,13 @@ mod tests {
 
         let tbs_bytes = encode_canonical(&tbs).unwrap();
         let sig = sk.sign(&tbs_bytes);
-        let pubkey_bytes: [u8; 32] = vk.to_bytes();
         let envelope = CborMandate {
             tag: "MANDATE-V1".to_string(),
             tbs: tbs_bytes.into(),
             signature: sig.to_bytes().to_vec().into(),
             issuer_pubkey: pubkey_bytes.to_vec().into(),
         };
-        let cbor = encode_canonical(&envelope).unwrap();
-        (cbor, pubkey_bytes)
+        encode_canonical(&envelope).unwrap()
     }
 
     /// Attacker-minted mandate + TrustAnchor::Roots → DENY issuer_untrusted.
@@ -2466,6 +2497,100 @@ mod tests {
         assert!(
             v.policy_rule.contains("vehicle_forbidden_domain"),
             "forbidden fires before issuer check; expected vehicle_forbidden_domain, got: {}",
+            v.policy_rule
+        );
+    }
+
+    /// Authority-chain delegation: an issuer authorised via a Root → Issuer
+    /// delegation chain is accepted under TrustAnchor::Chain, reusing
+    /// validate_mandate_against_authority() inside check_issuer_trust().
+    #[test]
+    fn test_authority_chain_delegation_proceeds() {
+        use crate::authority::{
+            create_root_delegation, delegate, AuthorityLevel, AuthorityScope, Jurisdiction,
+        };
+
+        // Root authority keypair
+        let root_sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let root_sk_hex = hex::encode(root_sk.to_bytes());
+        let root_pk: [u8; 32] = root_sk.verifying_key().to_bytes();
+
+        // Root scope — allows read_file
+        let root_scope = AuthorityScope {
+            allowed_tools: vec!["read_file".to_string()],
+            max_ttl_hours: 48,
+            max_rate_limit: 120,
+            max_active_mandates: 10,
+            ..AuthorityScope::default()
+        };
+
+        // Root self-signed delegation
+        let root_del = create_root_delegation(
+            &root_sk_hex,
+            "test-root",
+            root_scope,
+            Jurisdiction::default(),
+            48,
+        )
+        .unwrap();
+
+        // Issuer keypair — will sign the mandate
+        let issuer_sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let issuer_sk_hex = hex::encode(issuer_sk.to_bytes());
+        let issuer_did = format!(
+            "did:a2g:{}",
+            bs58::encode(issuer_sk.verifying_key().to_bytes()).into_string()
+        );
+
+        // Child delegation: root → issuer (Department level, subset scope)
+        let issuer_scope = AuthorityScope {
+            allowed_tools: vec!["read_file".to_string()],
+            max_ttl_hours: 24,
+            max_rate_limit: 60,
+            max_active_mandates: 5,
+            ..AuthorityScope::default()
+        };
+        let child_del = delegate(
+            &root_sk_hex,
+            &root_del,
+            &issuer_did,
+            "test-issuer",
+            AuthorityLevel::Department,
+            issuer_scope,
+            Jurisdiction::default(),
+            24,
+        )
+        .unwrap();
+        let _ = issuer_sk_hex; // key used only for signing below
+
+        // Mandate signed by issuer — issuer_did derived from issuer_sk matches child_del.grantee_did
+        let mandate_cbor =
+            build_cbor_mandate_with_signing_key("chain-test-agent", &["read_file"], 24, &issuer_sk);
+
+        // TrustAnchor::Chain: root pubkey pinned; chain validates issuer via delegation
+        let trusted_roots: &[[u8; 32]] = &[root_pk];
+        let chain = [root_del, child_del];
+        let trust = TrustAnchor::Chain {
+            trusted_roots,
+            chain: &chain,
+        };
+
+        let db = TestLedger;
+        let v = decide(
+            &mandate_cbor,
+            "read_file",
+            &serde_json::json!({}),
+            &db,
+            Utc::now(),
+            None,
+            &trust,
+        )
+        .unwrap();
+
+        assert_eq!(
+            v.decision,
+            Decision::Allow,
+            "authority-chain delegation must produce ALLOW: {}",
             v.policy_rule
         );
     }
