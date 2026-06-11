@@ -174,7 +174,7 @@ ADR-0009 introduced a per-process ephemeral `ed25519` key (`OnceLock<SigningKey>
 
 In the gateway model, the binding-signing key moves into the gateway. The rich domain sends an unsigned Phase-1 result to the gateway; the gateway signs the binding and returns the MAC-protected blob. The rich domain holds the signed blob opaquely and passes it back on Phase-2 entry. The gateway verifies its own signature.
 
-The `OnceLock<SigningKey>` in `a2g-ffi` remains functional for the demo tier (single-process with no gateway deployed) and should be labeled clearly as "demo only" once the gateway tier is available.
+~~The `OnceLock<SigningKey>` in `a2g-ffi` remains functional for the demo tier (single-process with no gateway deployed) and should be labeled clearly as "demo only" once the gateway tier is available.~~ **Update (ADR-0015):** the `OnceLock<SigningKey>` has been removed from `a2g-ffi` entirely; the gateway is the sole binding signer in all tiers.
 
 ### Vehicle-state attestation key (closes ADR-0007 §verifier deferred)
 

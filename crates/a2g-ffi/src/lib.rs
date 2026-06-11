@@ -5,13 +5,18 @@
 //! NUL-terminated strings. No private keys cross the boundary (ADR-0009 §Key exclusion).
 //! No I/O or blocking calls inside any decision function.
 //!
-//! # Binding integrity (ADR-0009 §Binding integrity)
-//! The `PendingApprovalBinding` that flows through the C ABI is protected by a
-//! per-process ed25519 signature embedded in the binding JSON as `a2g_mac`.
-//! The signing key is generated once at process startup (via `OnceLock`) and
-//! **never crosses the ABI**. A C caller that modifies any binding field
-//! (including `ttl_expires_at`) will produce a MAC mismatch at Phase 2,
-//! which returns `A2G_DECISION_ERROR`.
+//! # Binding integrity (ADR-0015 — gateway key custody)
+//! The binding-signing key lives in the **Enforcing Gateway only** (SPEC §9.8).
+//! This crate holds no binding-signing key: Phase 1 returns the *unsigned*
+//! `PendingApprovalBinding` JSON, which the host must present to the gateway's
+//! `SignBinding` operation. The gateway returns a signed blob (`a2g_mac` field).
+//! Phase 2 (`a2g_decide_with_approval`) verifies that blob against the
+//! **gateway's binding verifying key**, supplied by the host as a 32-byte
+//! ed25519 public key. A C caller that modifies any binding field (including
+//! `ttl_expires_at`) will produce a signature mismatch at Phase 2, which
+//! returns `A2G_DECISION_ERROR`. Passing NULL for the verifying key is also
+//! `A2G_DECISION_ERROR` — fail-explicit, consistent with ADR-0014's trust
+//! anchor contract.
 //!
 //! # Buffer ownership
 //! Strings returned by accessor functions are heap-allocated by Rust and must be
@@ -26,71 +31,13 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic;
-use std::sync::OnceLock;
 
 use a2g_core::enforce::{decide, decide_with_approval, Decision, Verdict};
-use a2g_core::hitl::{ApprovalGrant, PendingApprovalBinding};
+use a2g_core::hitl::{ApprovalGrant, SignedBinding};
 use a2g_core::ledger::NoopLedger;
 use a2g_core::vehicle::{Gear, VehicleState, VerifiedVehicleState};
 use chrono::Utc;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
-use rand::rngs::OsRng;
-use serde::{Deserialize, Serialize};
-
-// ── Per-process binding signing key ──────────────────────────────────────────
-
-/// Ephemeral ed25519 key generated once per process. Never exposed across the ABI.
-/// Used solely to MAC `PendingApprovalBinding` fields so a C host cannot extend
-/// TTL or substitute fields between Phase 1 and Phase 2.
-static BINDING_KEY: OnceLock<SigningKey> = OnceLock::new();
-
-fn binding_key() -> &'static SigningKey {
-    BINDING_KEY.get_or_init(|| SigningKey::generate(&mut OsRng))
-}
-
-/// Canonical CBOR bytes for `PendingApprovalBinding` MAC (ADR-0011).
-fn binding_bytes(b: &PendingApprovalBinding) -> Option<Vec<u8>> {
-    let hash_bytes = hex::decode(&b.request_hash).ok()?;
-    a2g_core::cbor::encode_canonical(&a2g_core::cbor::BindingPayload {
-        tag: "BINDING".to_string(),
-        binding_id: b.binding_id.clone(),
-        request_hash: hash_bytes.into(),
-        escalate_to: b.escalate_to.clone(),
-        ttl_unix_secs: b.ttl_expires_at.timestamp(),
-    })
-    .ok()
-}
-
-/// Signed wrapper emitted by Phase 1 and consumed by Phase 2.
-/// The `a2g_mac` field is opaque to the C host — it is the ed25519 signature
-/// (hex-encoded) over the canonical binding payload.
-#[derive(Serialize, Deserialize)]
-struct SignedBinding {
-    #[serde(flatten)]
-    binding: PendingApprovalBinding,
-    /// Per-process ed25519 signature over canonical binding fields (hex).
-    /// Tamper-evident: any field modification invalidates this tag.
-    a2g_mac: String,
-}
-
-fn sign_binding(b: &PendingApprovalBinding) -> Option<SignedBinding> {
-    let payload = binding_bytes(b)?;
-    let sig: Signature = binding_key().sign(&payload);
-    Some(SignedBinding {
-        binding: b.clone(),
-        a2g_mac: hex::encode(sig.to_bytes()),
-    })
-}
-
-/// Verify the MAC and return the inner binding, or `None` if tampered / malformed.
-fn verify_and_extract(signed_s: &str) -> Option<PendingApprovalBinding> {
-    let signed: SignedBinding = serde_json::from_str(signed_s).ok()?;
-    let payload = binding_bytes(&signed.binding)?;
-    let sig_bytes: [u8; 64] = hex::decode(&signed.a2g_mac).ok()?.try_into().ok()?;
-    let sig = Signature::from_bytes(&sig_bytes);
-    binding_key().verifying_key().verify(&payload, &sig).ok()?;
-    Some(signed.binding)
-}
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 
 // ── Decision enum (repr(C)) ───────────────────────────────────────────────────
 
@@ -138,7 +85,9 @@ pub struct A2gVerdictHandle {
     state_trust: CString,
     binding_id: CString,
     request_hash: CString,
-    /// MAC-protected JSON (`SignedBinding`); non-empty only when PendingApproval.
+    /// Unsigned `PendingApprovalBinding` JSON; non-empty only when PendingApproval.
+    /// The host must present this to the gateway's SignBinding operation
+    /// (ADR-0015) — this crate holds no binding-signing key.
     binding_json: CString,
 }
 
@@ -146,11 +95,7 @@ impl A2gVerdictHandle {
     fn new(v: Verdict) -> Box<Self> {
         let (binding_id, request_hash, binding_json) = match &v.pending_approval {
             Some(p) => {
-                let signed = sign_binding(p);
-                let json = signed
-                    .as_ref()
-                    .and_then(|s| serde_json::to_string(s).ok())
-                    .unwrap_or_default();
+                let json = serde_json::to_string(p).unwrap_or_default();
                 (p.binding_id.clone(), p.request_hash.clone(), json)
             }
             None => (String::new(), String::new(), String::new()),
@@ -328,9 +273,11 @@ pub unsafe extern "C" fn a2g_trust_anchor_free(handle: *mut A2gTrustAnchorHandle
 ///   a handle and express your trust policy explicitly.
 ///
 /// # Returns
-/// An `A2gDecision` integer. On `A2G_DECISION_PENDING_APPROVAL` the binding is
-/// accessible via `a2g_verdict_binding_json` on the handle written to `*out_verdict`.
-/// The binding JSON is MAC-protected — pass it unmodified to `a2g_decide_with_approval`.
+/// An `A2gDecision` integer. On `A2G_DECISION_PENDING_APPROVAL` the **unsigned**
+/// binding is accessible via `a2g_verdict_binding_json` on the handle written to
+/// `*out_verdict`. Present it to the Enforcing Gateway's SignBinding operation;
+/// the gateway returns the signed blob to pass to `a2g_decide_with_approval`
+/// (ADR-0015 — this library holds no binding-signing key).
 ///
 /// `*out_verdict` is always written on return (never NULL). Free with `a2g_verdict_free`.
 ///
@@ -408,25 +355,30 @@ pub unsafe extern "C" fn a2g_decide(
 /// Evaluate a governance decision with a pre-validated human approval (Phase 2).
 ///
 /// # Parameters
-/// - `mandate_cbor`     — same CBOR mandate bytes used in Phase 1.
-/// - `mandate_cbor_len` — length of the CBOR buffer in bytes.
-/// - `tool`             — same tool used in Phase 1.
-/// - `params_json`      — same parameters used in Phase 1.
-/// - `state`            — same vehicle state handle used in Phase 1, or NULL.
-/// - `binding_json`     — MAC-protected binding JSON from Phase 1.
-///   Obtain with `a2g_verdict_binding_json`. **Do not modify** — any field
-///   change invalidates the MAC and returns `A2G_DECISION_ERROR`.
-/// - `grant_json`       — JSON-serialised `ApprovalGrant` from the human approver.
-/// - `trust`            — Trust anchor handle (ADR-0014). Must not be NULL.
+/// - `mandate_cbor`        — same CBOR mandate bytes used in Phase 1.
+/// - `mandate_cbor_len`    — length of the CBOR buffer in bytes.
+/// - `tool`                — same tool used in Phase 1.
+/// - `params_json`         — same parameters used in Phase 1.
+/// - `state`               — same vehicle state handle used in Phase 1, or NULL.
+/// - `signed_binding_json` — **gateway-signed** binding blob from the gateway's
+///   SignBinding operation (ADR-0015). **Do not modify** — any field change
+///   invalidates the gateway signature and returns `A2G_DECISION_ERROR`.
+/// - `binding_pubkey`      — 32-byte ed25519 **verifying** key of the gateway's
+///   binding-signing key. **Must not be NULL** — there is no in-process fallback
+///   key (fail-explicit). Obtain from gateway provisioning / GetPublicKeys.
+/// - `grant_json`          — JSON-serialised `ApprovalGrant` from the human approver.
+/// - `trust`               — Trust anchor handle (ADR-0014). Must not be NULL.
 ///   Same handle used in Phase 1 is recommended.
 ///
 /// # Returns
 /// `A2G_DECISION_ALLOW` on success; `A2G_DECISION_DENY` on policy failure;
-/// `A2G_DECISION_ERROR` on tampered binding, invalid JSON, or internal error.
+/// `A2G_DECISION_ERROR` on tampered/unsigned binding, NULL `binding_pubkey`,
+/// invalid JSON, or internal error.
 /// `*out_verdict` is always written. Free with `a2g_verdict_free`.
 ///
 /// # Safety
-/// Same requirements as `a2g_decide`.
+/// Same requirements as `a2g_decide`; additionally `binding_pubkey` must be
+/// NULL or valid for 32 bytes.
 #[no_mangle]
 pub unsafe extern "C" fn a2g_decide_with_approval(
     mandate_cbor: *const u8,
@@ -434,13 +386,16 @@ pub unsafe extern "C" fn a2g_decide_with_approval(
     tool: *const c_char,
     params_json: *const c_char,
     state: *const A2gVerifiedStateHandle,
-    binding_json: *const c_char,
+    signed_binding_json: *const c_char,
+    binding_pubkey: *const u8,
     grant_json: *const c_char,
     trust: *const A2gTrustAnchorHandle,
     out_verdict: *mut *mut A2gVerdictHandle,
 ) -> A2gDecision {
-    // Fail-explicit: NULL trust is a programming error, not a default.
-    if trust.is_null() {
+    // Fail-explicit: NULL trust or NULL binding verifying key is a programming
+    // error, not a default. The binding key custody is the gateway's (ADR-0015);
+    // without its verifying key, Phase 2 cannot authenticate the binding.
+    if trust.is_null() || binding_pubkey.is_null() {
         if !out_verdict.is_null() {
             *out_verdict = Box::into_raw(make_error_verdict());
         }
@@ -455,11 +410,16 @@ pub unsafe extern "C" fn a2g_decide_with_approval(
         let tool_s = cstr_to_str(tool)?;
         let params_s = cstr_to_str(params_json).unwrap_or("{}");
         let params: serde_json::Value = serde_json::from_str(params_s).ok()?;
-        let binding_s = cstr_to_str(binding_json)?;
+        let binding_s = cstr_to_str(signed_binding_json)?;
         let grant_s = cstr_to_str(grant_json)?;
 
-        // MAC verification: reject tampered binding before it reaches core.
-        let pending = verify_and_extract(binding_s)?;
+        // Gateway-signature verification: reject any binding not signed by the
+        // gateway's binding key before it reaches core (ADR-0015).
+        let key_bytes: [u8; 32] = std::slice::from_raw_parts(binding_pubkey, 32)
+            .try_into()
+            .ok()?;
+        let gateway_binding_key = VerifyingKey::from_bytes(&key_bytes).ok()?;
+        let pending = SignedBinding::verify_json(binding_s, &gateway_binding_key).ok()?;
         let grant: ApprovalGrant = serde_json::from_str(grant_s).ok()?;
 
         let verified = if state.is_null() {
@@ -606,12 +566,14 @@ pub unsafe extern "C" fn a2g_verdict_request_hash(
     (*handle).request_hash.as_ptr()
 }
 
-/// Returns the Phase 1 MAC-protected binding JSON when `a2g_verdict_decision` is
-/// `A2G_DECISION_PENDING_APPROVAL`; otherwise empty string.
+/// Returns the Phase 1 **unsigned** `PendingApprovalBinding` JSON when
+/// `a2g_verdict_decision` is `A2G_DECISION_PENDING_APPROVAL`; otherwise empty string.
 ///
-/// Pass this value **unmodified** as `binding_json` to `a2g_decide_with_approval`.
-/// Any modification to the returned string will cause Phase 2 to return
-/// `A2G_DECISION_ERROR` (MAC mismatch). The pointer is valid until `a2g_verdict_free`.
+/// Present this value to the Enforcing Gateway's SignBinding operation. The
+/// gateway validates, signs with its binding key, queues the entry, and returns
+/// the signed blob — pass *that* blob (not this one) as `signed_binding_json`
+/// to `a2g_decide_with_approval` (ADR-0015). The pointer is valid until
+/// `a2g_verdict_free`.
 ///
 /// # Safety
 /// `handle` must be valid and non-freed.
@@ -1016,9 +978,60 @@ mod tests {
         }
     }
 
-    // ── Binding integrity tests ───────────────────────────────────────────────
+    // ── Binding integrity tests (ADR-0015: gateway key custody) ───────────────
+    //
+    // The FFI holds no binding-signing key. These tests simulate the GATEWAY's
+    // role with a locally generated key pair: the test signs the Phase 1 binding
+    // the way the gateway's SignBinding operation does, then hands the FFI only
+    // the gateway's VERIFYING key — exactly the production arrangement.
 
-    /// (a) Unmodified binding round-trips: Phase 1 → Phase 2 → Allow.
+    /// Simulated gateway: sign an unsigned Phase 1 binding JSON, returning
+    /// (signed_blob_json, gateway_binding_verifying_key_bytes).
+    fn gateway_sign(unsigned_binding_json: &str) -> (String, [u8; 32]) {
+        let binding: a2g_core::hitl::PendingApprovalBinding =
+            serde_json::from_str(unsigned_binding_json).unwrap();
+        // This key plays the GATEWAY's binding key. The FFI under test never
+        // sees the signing half — only the 32-byte verifying key below.
+        let gw_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let signed = SignedBinding::sign(&binding, &gw_key).unwrap();
+        (
+            serde_json::to_string(&signed).unwrap(),
+            gw_key.verifying_key().to_bytes(),
+        )
+    }
+
+    /// Run Phase 2 through the C ABI with explicit binding blob + verifying key.
+    unsafe fn phase2_c(
+        mandate: &[u8],
+        signed_binding_json: &str,
+        binding_pubkey: *const u8,
+        grant_json: &str,
+        state: *const A2gVerifiedStateHandle,
+    ) -> A2gDecision {
+        let tool_c = CString::new("WINDOW_POS").unwrap();
+        let params_c = CString::new("{}").unwrap();
+        let binding_c = CString::new(signed_binding_json).unwrap();
+        let grant_c = CString::new(grant_json).unwrap();
+        let trust = a2g_trust_anchor_self_sovereign();
+        let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
+        let d = a2g_decide_with_approval(
+            mandate.as_ptr(),
+            mandate.len(),
+            tool_c.as_ptr(),
+            params_c.as_ptr(),
+            state,
+            binding_c.as_ptr(),
+            binding_pubkey,
+            grant_c.as_ptr(),
+            trust,
+            &mut out,
+        );
+        a2g_trust_anchor_free(trust);
+        a2g_verdict_free(out);
+        d
+    }
+
+    /// (a) Gateway-signed binding round-trips: Phase 1 → gateway sign → Phase 2 → Allow.
     #[test]
     fn test_binding_round_trip_phase2_succeeds() {
         let mandate = escalate_mandate("WINDOW_POS");
@@ -1027,7 +1040,7 @@ mod tests {
         assert!(!state.is_null());
 
         unsafe {
-            // Phase 1
+            // Phase 1 — FFI returns the UNSIGNED binding
             let (d1, h1) = decide_c(&mandate, "WINDOW_POS", "{}", state);
             assert_eq!(
                 d1,
@@ -1035,7 +1048,7 @@ mod tests {
                 "escalate mandate must pend"
             );
 
-            let binding_json = CStr::from_ptr(a2g_verdict_binding_json(h1))
+            let unsigned_json = CStr::from_ptr(a2g_verdict_binding_json(h1))
                 .to_str()
                 .unwrap()
                 .to_string();
@@ -1049,7 +1062,17 @@ mod tests {
                 .to_string();
             a2g_verdict_free(h1);
 
-            // Create a grant signed by an ephemeral approver key
+            // The unsigned binding must carry no gateway signature field.
+            let v: serde_json::Value = serde_json::from_str(&unsigned_json).unwrap();
+            assert!(
+                v.get("a2g_mac").is_none(),
+                "Phase 1 binding must be unsigned — the FFI holds no binding key"
+            );
+
+            // Gateway signs (simulated)
+            let (signed_json, gw_pubkey) = gateway_sign(&unsigned_json);
+
+            // Approver grant
             let approver_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
             let grant = a2g_core::hitl::ApprovalGrant::new_signed(
                 &bid,
@@ -1063,37 +1086,25 @@ mod tests {
             .expect("test grant must sign");
             let grant_json = serde_json::to_string(&grant).unwrap();
 
-            // Phase 2 with the unmodified binding
-            let tool_c = CString::new("WINDOW_POS").unwrap();
-            let params_c = CString::new("{}").unwrap();
-            let binding_c = CString::new(binding_json).unwrap();
-            let grant_c = CString::new(grant_json).unwrap();
-            let trust2 = a2g_trust_anchor_self_sovereign();
-            let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
-            let d2 = a2g_decide_with_approval(
-                mandate.as_ptr(),
-                mandate.len(),
-                tool_c.as_ptr(),
-                params_c.as_ptr(),
+            let d2 = phase2_c(
+                &mandate,
+                &signed_json,
+                gw_pubkey.as_ptr(),
+                &grant_json,
                 state,
-                binding_c.as_ptr(),
-                grant_c.as_ptr(),
-                trust2,
-                &mut out,
             );
-            a2g_trust_anchor_free(trust2);
             assert_eq!(
                 d2,
                 A2gDecision::Allow,
-                "unmodified binding must allow in Phase 2"
+                "gateway-signed binding must allow in Phase 2"
             );
-            a2g_verdict_free(out);
             a2g_verified_state_free(state);
         }
     }
 
-    /// Helper: run Phase 1 for WINDOW_POS escalate mandate, return (binding_json, mandate_cbor).
-    fn phase1_binding() -> (String, Vec<u8>) {
+    /// Helper: run Phase 1, gateway-sign the binding, return
+    /// (signed_json, gateway_pubkey, mandate_cbor).
+    fn phase1_signed_binding() -> (String, [u8; 32], Vec<u8>) {
         let mandate = escalate_mandate("WINDOW_POS");
         let state = a2g_verified_state_operator_trusted(0.0, 0, 0);
         assert!(!state.is_null());
@@ -1106,89 +1117,91 @@ mod tests {
                 .to_string();
             a2g_verdict_free(h);
             a2g_verified_state_free(state);
-            (json, mandate)
+            let (signed, pubkey) = gateway_sign(&json);
+            (signed, pubkey, mandate)
         }
     }
 
-    /// (b) A binding with a mutated `request_hash` is rejected.
+    /// (b) A signed binding with a mutated `request_hash` is rejected.
     #[test]
     fn test_tampered_request_hash_rejected() {
-        let (binding_json, mandate) = phase1_binding();
+        let (signed_json, gw_pubkey, mandate) = phase1_signed_binding();
 
-        // Mutate request_hash in the JSON
-        let mut v: serde_json::Value = serde_json::from_str(&binding_json).unwrap();
+        // Mutate request_hash in the signed blob
+        let mut v: serde_json::Value = serde_json::from_str(&signed_json).unwrap();
         v["request_hash"] =
             serde_json::json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let tampered = serde_json::to_string(&v).unwrap();
 
-        // Phase 2 with tampered binding — must return Error (MAC mismatch)
         unsafe {
             let state = a2g_verified_state_operator_trusted(0.0, 0, 0);
-            let tool_c = CString::new("WINDOW_POS").unwrap();
-            let params_c = CString::new("{}").unwrap();
-            let binding_c = CString::new(tampered).unwrap();
-            // Grant doesn't matter — MAC check fires first
-            let grant_c = CString::new("{}").unwrap();
-            let trust = a2g_trust_anchor_self_sovereign();
-            let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
-            let d = a2g_decide_with_approval(
-                mandate.as_ptr(),
-                mandate.len(),
-                tool_c.as_ptr(),
-                params_c.as_ptr(),
-                state,
-                binding_c.as_ptr(),
-                grant_c.as_ptr(),
-                trust,
-                &mut out,
-            );
-            a2g_trust_anchor_free(trust);
+            // Grant doesn't matter — signature check fires first
+            let d = phase2_c(&mandate, &tampered, gw_pubkey.as_ptr(), "{}", state);
             assert_eq!(
                 d,
                 A2gDecision::Error,
                 "tampered request_hash must return Error"
             );
-            a2g_verdict_free(out);
             a2g_verified_state_free(state);
         }
     }
 
-    /// (c) A binding with an extended `ttl_expires_at` is rejected.
+    /// (c) A signed binding with an extended `ttl_expires_at` is rejected.
     #[test]
     fn test_tampered_ttl_rejected() {
-        let (binding_json, mandate) = phase1_binding();
+        let (signed_json, gw_pubkey, mandate) = phase1_signed_binding();
 
-        // Extend the TTL by 1 day — attacker trying to use an expired Phase 1 request
-        let mut v: serde_json::Value = serde_json::from_str(&binding_json).unwrap();
+        // Extend the TTL by decades — attacker trying to reuse an expired Phase 1 request
+        let mut v: serde_json::Value = serde_json::from_str(&signed_json).unwrap();
         v["ttl_expires_at"] = serde_json::json!("2099-01-01T00:00:00Z");
         let tampered = serde_json::to_string(&v).unwrap();
 
         unsafe {
             let state = a2g_verified_state_operator_trusted(0.0, 0, 0);
-            let tool_c = CString::new("WINDOW_POS").unwrap();
-            let params_c = CString::new("{}").unwrap();
-            let binding_c = CString::new(tampered).unwrap();
-            let grant_c = CString::new("{}").unwrap();
-            let trust = a2g_trust_anchor_self_sovereign();
-            let mut out: *mut A2gVerdictHandle = std::ptr::null_mut();
-            let d = a2g_decide_with_approval(
-                mandate.as_ptr(),
-                mandate.len(),
-                tool_c.as_ptr(),
-                params_c.as_ptr(),
-                state,
-                binding_c.as_ptr(),
-                grant_c.as_ptr(),
-                trust,
-                &mut out,
-            );
-            a2g_trust_anchor_free(trust);
+            let d = phase2_c(&mandate, &tampered, gw_pubkey.as_ptr(), "{}", state);
             assert_eq!(
                 d,
                 A2gDecision::Error,
                 "tampered ttl_expires_at must return Error"
             );
-            a2g_verdict_free(out);
+            a2g_verified_state_free(state);
+        }
+    }
+
+    /// (d) A binding signed by a key that is NOT the gateway's is rejected —
+    /// the rich domain cannot mint its own bindings (ADR-0015 forge attempt).
+    #[test]
+    fn test_forged_binding_wrong_key_rejected() {
+        let (signed_json, _gw_pubkey, mandate) = phase1_signed_binding();
+
+        // The verifier is given a DIFFERENT key than the one that signed.
+        let other_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let wrong_pubkey = other_key.verifying_key().to_bytes();
+
+        unsafe {
+            let state = a2g_verified_state_operator_trusted(0.0, 0, 0);
+            let d = phase2_c(&mandate, &signed_json, wrong_pubkey.as_ptr(), "{}", state);
+            assert_eq!(
+                d,
+                A2gDecision::Error,
+                "binding signed by a non-gateway key must return Error"
+            );
+            a2g_verified_state_free(state);
+        }
+    }
+
+    /// (e) NULL binding_pubkey is fail-explicit: A2G_DECISION_ERROR.
+    #[test]
+    fn test_null_binding_pubkey_returns_error() {
+        let (signed_json, _gw_pubkey, mandate) = phase1_signed_binding();
+        unsafe {
+            let state = a2g_verified_state_operator_trusted(0.0, 0, 0);
+            let d = phase2_c(&mandate, &signed_json, std::ptr::null(), "{}", state);
+            assert_eq!(
+                d,
+                A2gDecision::Error,
+                "NULL binding_pubkey must return Error (fail-explicit)"
+            );
             a2g_verified_state_free(state);
         }
     }

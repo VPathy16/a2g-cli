@@ -48,6 +48,11 @@ pub struct DemoKeys {
     pub receipt_verifying_key_hex: String,
     pub attester_verifying_key_hex: String,
     pub operator_verifying_key_hex: String,
+    /// Gateway's binding *verifying* key. The rich domain uses this to verify
+    /// gateway-signed bindings at Phase 2 (ADR-0015). The signing half never
+    /// leaves the gateway.
+    #[serde(default)]
+    pub binding_verifying_key_hex: String,
 }
 
 impl DemoKeys {
@@ -79,6 +84,7 @@ fn signing_key_from_hex(hex: &str) -> SigningKey {
 pub fn generate(demo_key_path: &Path) -> (GatewayKeys, DemoKeys) {
     // Gateway internal keys
     let binding_signing_key = SigningKey::generate(&mut OsRng);
+    let binding_verifying_key = binding_signing_key.verifying_key();
 
     // Receipt key — private half goes to demo file, public half stays in gateway
     let receipt_signing_key = SigningKey::generate(&mut OsRng);
@@ -110,6 +116,7 @@ pub fn generate(demo_key_path: &Path) -> (GatewayKeys, DemoKeys) {
         receipt_verifying_key_hex: hex::encode(receipt_verifying_key.to_bytes()),
         attester_verifying_key_hex: hex::encode(attester_verifying_key.to_bytes()),
         operator_verifying_key_hex: hex::encode(operator_verifying_key.to_bytes()),
+        binding_verifying_key_hex: hex::encode(binding_verifying_key.to_bytes()),
     };
 
     if let Err(e) = std::fs::write(demo_key_path, serde_json::to_string_pretty(&demo).unwrap()) {
@@ -120,4 +127,66 @@ pub fn generate(demo_key_path: &Path) -> (GatewayKeys, DemoKeys) {
     }
 
     (keys, demo)
+}
+
+// ── Production keystore (ADR-0015; SPEC §10.1 Level 3) ───────────────────────
+
+/// On-disk keystore for `--production` startup. Holds the gateway's private
+/// binding-signing key and the verifying keys it must trust. The receipt,
+/// attester, and operator *signing* keys are NOT in this file — they belong to
+/// other parties and never enter the gateway's address space.
+#[derive(Serialize, Deserialize)]
+pub struct ProductionKeystore {
+    /// Hex 32-byte ed25519 seed for the gateway's binding-signing key.
+    pub binding_signing_key_hex: String,
+    /// Hex 32-byte ed25519 public key of the rich domain's receipt signer.
+    pub receipt_verifying_key_hex: String,
+    /// Hex 32-byte ed25519 public key of the ECU/HAL state attester.
+    pub attester_verifying_key_hex: String,
+    /// Hex 32-byte ed25519 public key of the human operator.
+    pub operator_verifying_key_hex: String,
+}
+
+/// Load gateway keys from a provisioned keystore file.
+///
+/// Returns `Err` with a human-readable reason on any failure — the caller
+/// (production startup) MUST refuse to start in that case (SPEC §10.1 Level 3:
+/// "Refuses to start in production mode without a properly provisioned key store").
+pub fn load_production(keystore_path: &Path) -> Result<GatewayKeys, String> {
+    let raw = std::fs::read_to_string(keystore_path)
+        .map_err(|e| format!("cannot read keystore {}: {e}", keystore_path.display()))?;
+    let ks: ProductionKeystore =
+        serde_json::from_str(&raw).map_err(|e| format!("malformed keystore JSON: {e}"))?;
+
+    let binding_signing_key = parse_signing_key(&ks.binding_signing_key_hex)
+        .map_err(|e| format!("binding_signing_key_hex: {e}"))?;
+    let receipt_verifying_key = parse_verifying_key(&ks.receipt_verifying_key_hex)
+        .map_err(|e| format!("receipt_verifying_key_hex: {e}"))?;
+    let attester_verifying_key = parse_verifying_key(&ks.attester_verifying_key_hex)
+        .map_err(|e| format!("attester_verifying_key_hex: {e}"))?;
+    let operator_verifying_key = parse_verifying_key(&ks.operator_verifying_key_hex)
+        .map_err(|e| format!("operator_verifying_key_hex: {e}"))?;
+
+    Ok(GatewayKeys {
+        binding_signing_key,
+        receipt_verifying_key,
+        attester_verifying_key,
+        operator_verifying_key,
+    })
+}
+
+fn parse_signing_key(hex_str: &str) -> Result<SigningKey, String> {
+    let bytes: [u8; 32] = ::hex::decode(hex_str)
+        .map_err(|e| format!("invalid hex: {e}"))?
+        .try_into()
+        .map_err(|_| "key must be exactly 32 bytes".to_string())?;
+    Ok(SigningKey::from_bytes(&bytes))
+}
+
+fn parse_verifying_key(hex_str: &str) -> Result<VerifyingKey, String> {
+    let bytes: [u8; 32] = ::hex::decode(hex_str)
+        .map_err(|e| format!("invalid hex: {e}"))?
+        .try_into()
+        .map_err(|_| "key must be exactly 32 bytes".to_string())?;
+    VerifyingKey::from_bytes(&bytes).map_err(|e| format!("not a valid ed25519 point: {e}"))
 }

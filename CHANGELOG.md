@@ -4,9 +4,97 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] — 2026-06-11
+
+### Protocol Freeze
+
+v0.2.0 freezes the following protocol elements. Breaking changes to these
+surfaces will require a v0.3.0 (semver minor + changelog entry):
+
+- **CBOR transport frame**: `[u32 BE length][ciborium CBOR body]`.
+  `GatewayRequest` and `GatewayResponse` serialized via `serde` + `ciborium`.
+- **Receipt canonical payload** (CBOR array `["RECEIPT", …]`): field order,
+  types, and tag are normative.  Any change to the signing surface is a
+  breaking protocol change.
+- **BindingPayload** CBOR array `["BINDING", binding_id, request_hash, escalate_to, ttl_unix_secs]`:
+  normative for gateway signing and rich-domain verification.
+- **E2E frame layout** (ADR-0016): Speed CAN ID `0x3A0`, Gear CAN ID `0x3A1`,
+  `SPEED_DATA_ID=0xA0`, `GEAR_DATA_ID=0xA1`, alive counter modulus 15,
+  CRC-8/SAE-J1850 trailer.
+- **FFI ABI** (`a2g.h`): `a2g_decide`, `a2g_decide_with_approval`,
+  `a2g_trust_anchor_*` signature freeze.
+
 ## [Unreleased]
 
+### Added
+
+- **CBOR transport framing (P4)** — the Unix socket protocol is now
+  length-prefixed CBOR (`[u32 BE len][ciborium body]`), replacing
+  newline-delimited JSON.  All `GatewayRequest` / `GatewayResponse` variants
+  are serialized with `serde` + `ciborium`. The `transport` module provides
+  `write_frame` / `read_frame` helpers and a `MAX_FRAME_BYTES = 8 MiB` guard.
+  The JSON `Serialize`/`Deserialize` impls are retained for diagnostics and key
+  files but are no longer used on the transport path.
+
+- **Pending queue and nonce persistence (P3)** — `PendingQueue::with_persist(path)`
+  atomically persists the approval queue and nonce high-water mark to disk.
+  `a2g-gateway --queue-persist <path>` enables persistence. The HWM is loaded
+  on startup and used as a post-restart replay gate (receipts from the previous
+  session are rejected until the HWM advances). `GatewayState::new_with_queue()`
+  exposed for injection in tests and `main`.
+
+- **Adversarial test suite (P2; CI job `adversarial`)** — 10 attacks, each
+  mapped to the gateway verification step it targets:
+  1. Forbidden bypass, 2. Wrong signing key, 3. Tampered tool post-signing,
+  4. Decision field mutation, 5. Nonce replay, 6. Past timestamp,
+  7. Future timestamp, 8. Request hash mutation, 9. Phantom binding ID,
+  10. CAN state mismatch (ADR-0016 re-gate). CI step: `cargo test -p
+  a2g-gateway --test adversarial`.
+
+- **Gateway-side vehicle state ingestion (ADR-0016; P1)**
+  — The Enforcing Gateway now subscribes directly to SocketCAN and
+  independently re-gates Sensitive-domain enforcement against live bus data.
+  - New module `a2g-gateway::state_ingest`: E2E-inspired frame protection
+    (CRC-8/SAE-J1850, Profile 1 polynomial 0x1D, over 7 payload bytes + data
+    ID; alive counter anti-replay). Speed frame on CAN ID `0x3A0`, gear on
+    `0x3A1`. Not a full AUTOSAR-E2E profile implementation.
+  - New `bus::CanReader`: Linux-only SocketCAN reader with configurable
+    `SO_RCVTIMEO`; returns `Ok(None)` on timeout for non-blocking poll.
+  - `GatewayState` gains `state_ingest: Arc<StateIngest>`.
+  - `handle_enforce()` re-gates Sensitive tools: fresh gateway state overrides
+    the rich domain's claim; mismatch → `REFUSE state_authority_mismatch`.
+    No fresh data → warn on `operator_trusted` receipts; pass on `attested`
+    (already independently verified by ECU signature).
+  - `a2g-gateway --state-ingest` flag activates the background SocketCAN reader.
+  - New binary `a2g-state-sim`: broadcasts valid E2E frames at 50 Hz
+    (`--vcan`, `--speed-kph`, `--gear`). Used for integration testing and demo.
+  - `a2g-core` gains `operator-state` Cargo feature (default on); gates
+    `from_operator_trusted()` so production builds can make unattested state a
+    compile error.
+  - Fail-safe: both signals must be refreshed within `ATTESTATION_FRESHNESS_MS`
+    (500 ms) or the ingested state degrades to `speed_mmps=277_500`, gear `Drive`.
+
 ### Breaking
+
+- **Binding-signing key moved out of the rich domain into the gateway (ADR-0015)**
+  — closes SPEC Appendix A.1 (circular trust assumption). One binding signer in
+  the system: `a2g-gateway`.
+  - The ephemeral `OnceLock<SigningKey>` is **removed** from `a2g-ffi`. The rich
+    domain holds only the gateway's binding *verifying* key.
+  - `a2g_decide()` Phase 1 now returns the **unsigned** `PendingApprovalBinding`
+    JSON; the host must present it to the gateway's `SignBinding` operation.
+  - `a2g_decide_with_approval()` gains a mandatory
+    `const uint8_t *binding_pubkey` (32-byte gateway binding verifying key) and
+    its `binding_json` parameter is renamed `signed_binding_json` (the
+    gateway-signed blob). NULL `binding_pubkey` → `A2G_DECISION_ERROR`
+    (fail-explicit, no in-process fallback key).
+  - New shared wire type `a2g_core::hitl::SignedBinding` (sign/verify of the
+    canonical CBOR `BindingPayload`); the private duplicates in `a2g-ffi` and
+    `a2g-gateway` are gone.
+  - `DemoKeys` / `GetPublicKeys` gain `binding_verifying_key_hex`.
+  - `a2g-gateway --production` now requires `--keystore <path>`; it refuses to
+    start without a properly provisioned keystore (SPEC §10.1 Level 3). Dev mode
+    still generates ephemeral keys with a loud warning.
 
 - **Issuer trust enforcement added to the decision pipeline (ADR-0014)**
   — `decide()`, `enforce()`, and `decide_with_approval()` in `a2g-core` gain a

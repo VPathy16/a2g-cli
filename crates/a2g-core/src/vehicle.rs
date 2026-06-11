@@ -584,6 +584,63 @@ pub fn evaluate_vehicle_state(_tool: &str, state: &VehicleState) -> StateVerdict
     StateVerdict::Allow
 }
 
+// ── Context-aware Comfort policies (P7) ─────────────────────────────────────
+
+/// Evaluate vehicle-state context for a **Comfort-domain** tool.
+///
+/// Returns `Allow` unless the tool is a seat-position adjustment requested by the
+/// **Driver** zone at any appreciable speed.  Passenger-zone seat adjustments are
+/// never gated — a passenger legitimately adjusts their seat at highway speed.
+/// All other Comfort tools (HVAC, lighting, media) always ALLOW.
+///
+/// Rules:
+/// - `Actor::Driver` + seat tool + `speed_mmps >= SPEED_GATE_MMPS` (≥ 5 km/h): DENY.
+/// - `Actor::Passenger` + seat tool: ALLOW unconditionally.
+/// - All other Comfort tools: ALLOW.
+/// - No vehicle state supplied: ALLOW (Comfort is safe by omission).
+///
+/// ## Known limitation
+///
+/// This gate is evaluated inside `decide()` on the rich-domain path.  Unlike the
+/// Sensitive re-gate (ADR-0016), the gateway does **not** independently re-enforce
+/// the Comfort seat gate against its own ingested CAN state.  A compromised rich
+/// domain could in principle ALLOW a driver-seat adjustment while in motion.
+/// Acceptable for the current demo tier; a future ADR may extend gateway re-gating
+/// to the Comfort seat path.
+///
+/// ## no_std
+///
+/// Pure, deterministic, allocation-free. `Deny` carries a `&'static str` reason.
+pub fn evaluate_comfort_state(tool: &str, state: &VehicleState) -> StateVerdict {
+    if is_comfort_seat_tool(tool)
+        && state.actor == Actor::Driver
+        && state.speed_mmps >= SPEED_GATE_MMPS
+    {
+        return StateVerdict::Deny(
+            "comfort_context_violation: driver-zone seat-position adjustment blocked while \
+             in motion (speed_mmps >= 1389, >= 5.0 km/h); passenger-zone adjustments \
+             are not restricted",
+        );
+    }
+    StateVerdict::Allow
+}
+
+/// Returns `true` if the tool name is a seat-position adjustment tool subject to
+/// the driver-zone motion gate.
+fn is_comfort_seat_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "SEAT_FORE_AFT_MOVE"
+            | "SEAT_HEIGHT_MOVE"
+            | "SEAT_LUMBAR_FORE_AFT_MOVE"
+            | "SEAT_HEADREST_ANGLE_MOVE"
+            | "vehicle.seat.fore_aft"
+            | "vehicle.seat.height"
+            | "vehicle.seat.lumbar"
+            | "vehicle.seat.headrest"
+    )
+}
+
 /// Extract a `VehicleState` from the `vehicle_state` key in params JSON.
 ///
 /// Expects `{"speed_mmps": <u32>, "gear": "Park"|"Drive"|"Reverse"|"Neutral",
@@ -819,11 +876,33 @@ impl VerifiedVehicleState {
 
     /// Interim operator-trusted constructor for the CLI path (ADR-0007 §4).
     ///
-    /// The operator is responsible for supplying accurate state. This constructor
-    /// is expected to be replaced by [`AttestedVehicleState::verify`] once the
-    /// Secure Gateway is deployed. Records `StateTrust::OperatorTrusted` in the verdict.
+    /// The operator is responsible for supplying accurate state. Records
+    /// `StateTrust::OperatorTrusted` in the verdict.
+    ///
+    /// Gated behind the `operator-state` cargo feature (on by default;
+    /// ADR-0016). Production builds disable the feature
+    /// (`default-features = false, features = ["std"]`), making
+    /// operator-asserted state a compile error: only gateway-verified
+    /// attested state can then reach `decide()`. The Enforcing Gateway
+    /// additionally re-gates Sensitive enforcement against its own ingested
+    /// state and logs a warning whenever it sees an `operator_trusted` receipt.
+    #[cfg(feature = "operator-state")]
     pub fn from_operator_trusted(state: VehicleState) -> Self {
         VerifiedVehicleState::new(state, StateTrust::OperatorTrusted)
+    }
+
+    /// Gateway-ingestion constructor (ADR-0016).
+    ///
+    /// For use by the **Enforcing Gateway's** state-ingestion path only: state
+    /// that arrived on the vehicle bus and passed AUTOSAR-E2E-style integrity
+    /// verification (CRC + alive counter + staleness deadline). Records
+    /// `StateTrust::Attested` — the gateway is the designated verifier
+    /// (SPEC §6.7); E2E protection is the in-vehicle integrity mechanism.
+    ///
+    /// Rich-domain callers MUST NOT use this constructor; it exists so the
+    /// gateway can re-gate enforcement against its own bus-derived state.
+    pub fn from_gateway_e2e_verified(state: VehicleState) -> Self {
+        VerifiedVehicleState::new(state, StateTrust::Attested)
     }
 
     /// Test-only bypass — produces a `VerifiedVehicleState` without cryptographic attestation.
@@ -1170,5 +1249,125 @@ mod tests {
         assert_eq!(state.gear, Gear::Park);
         assert_eq!(state.actor, Actor::Passenger);
         assert!(state.is_parked_and_stopped());
+    }
+
+    // ── Context-aware Comfort policies (P7) ──────────────────────────────────
+
+    #[test]
+    fn test_comfort_driver_seat_below_speed_gate_allowed() {
+        // Driver at 3.6 km/h (1000 mm/s) — below the 5 km/h motion gate.
+        let state = VehicleState {
+            speed_mmps: 1_000,
+            gear: Gear::Drive,
+            actor: Actor::Driver,
+        };
+        assert_eq!(
+            evaluate_comfort_state("SEAT_FORE_AFT_MOVE", &state),
+            StateVerdict::Allow,
+            "driver seat adjustment below 5 km/h must be ALLOW"
+        );
+    }
+
+    #[test]
+    fn test_comfort_driver_seat_at_speed_gate_denied() {
+        // Driver exactly at SPEED_GATE_MMPS (5 km/h) — should be DENY.
+        let state = VehicleState {
+            speed_mmps: SPEED_GATE_MMPS,
+            gear: Gear::Drive,
+            actor: Actor::Driver,
+        };
+        assert!(
+            matches!(
+                evaluate_comfort_state("SEAT_FORE_AFT_MOVE", &state),
+                StateVerdict::Deny(_)
+            ),
+            "driver seat adjustment at SPEED_GATE_MMPS must be DENY"
+        );
+    }
+
+    #[test]
+    fn test_comfort_driver_seat_in_motion_denied() {
+        // Driver at 80 km/h — all seat-position tools must be DENY.
+        let state = VehicleState {
+            speed_mmps: 22_222,
+            gear: Gear::Drive,
+            actor: Actor::Driver,
+        };
+        for tool in &[
+            "SEAT_FORE_AFT_MOVE",
+            "SEAT_HEIGHT_MOVE",
+            "SEAT_LUMBAR_FORE_AFT_MOVE",
+            "SEAT_HEADREST_ANGLE_MOVE",
+            "vehicle.seat.fore_aft",
+        ] {
+            assert!(
+                matches!(evaluate_comfort_state(tool, &state), StateVerdict::Deny(_)),
+                "driver seat tool {} at speed must be DENY",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_comfort_passenger_seat_at_speed_allowed() {
+        // Passenger adjusting their seat at 80 km/h must always be ALLOW.
+        let state = VehicleState {
+            speed_mmps: 22_222,
+            gear: Gear::Drive,
+            actor: Actor::Passenger,
+        };
+        for tool in &[
+            "SEAT_FORE_AFT_MOVE",
+            "SEAT_HEIGHT_MOVE",
+            "SEAT_LUMBAR_FORE_AFT_MOVE",
+            "SEAT_HEADREST_ANGLE_MOVE",
+            "vehicle.seat.fore_aft",
+        ] {
+            assert_eq!(
+                evaluate_comfort_state(tool, &state),
+                StateVerdict::Allow,
+                "passenger seat tool {} must be ALLOW at any speed",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_comfort_hvac_not_gated_by_speed() {
+        // HVAC, lighting, and media tools must be ALLOW regardless of speed or actor.
+        let state = VehicleState {
+            speed_mmps: 277_500, // 999 km/h (fail-safe speed)
+            gear: Gear::Drive,
+            actor: Actor::Driver,
+        };
+        for tool in &[
+            "HVAC_TEMPERATURE_SET",
+            "HVAC_FAN_SPEED",
+            "HVAC_POWER_ON",
+            "CABIN_LIGHTS_SWITCH",
+            "SEAT_MEMORY_SELECT",
+        ] {
+            assert_eq!(
+                evaluate_comfort_state(tool, &state),
+                StateVerdict::Allow,
+                "Comfort tool {} must not be gated by speed",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_comfort_driver_seat_deny_message() {
+        let state = VehicleState {
+            speed_mmps: 20_000,
+            gear: Gear::Drive,
+            actor: Actor::Driver,
+        };
+        match evaluate_comfort_state("SEAT_HEIGHT_MOVE", &state) {
+            StateVerdict::Deny(r) => {
+                assert!(r.contains("comfort_context_violation"), "reason: {r}")
+            }
+            StateVerdict::Allow => panic!("expected Deny"),
+        }
     }
 }

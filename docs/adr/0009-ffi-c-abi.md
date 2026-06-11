@@ -94,11 +94,19 @@ A2gDecision a2g_decide_with_approval(
 
 Validates the grant and runs Phase 2 enforcement. The `binding_json` must be exactly what was returned by `a2g_verdict_binding_json` in Phase 1; re-computing it at Phase 2 time would break hash matching across the async gap (see ADR-0008). Any field modification invalidates the MAC and returns `A2G_DECISION_ERROR`.
 
-### Phase-2 binding integrity (MAC protection)
+### Phase-2 binding integrity (signature protection)
 
-The `binding_json` blob that crosses the C ABI between Phase 1 and Phase 2 is **MAC-protected**. This prevents a C host from tampering with binding fields to extend TTLs or redirect escalation targets.
+> **Superseded by ADR-0015.** The per-process `OnceLock<SigningKey>` described
+> below has been removed. The binding-signing key now lives exclusively in the
+> Enforcing Gateway; Phase 1 returns the unsigned binding, the gateway's
+> SignBinding operation signs it, and Phase 2 verifies the blob against the
+> caller-supplied gateway binding verifying key (`binding_pubkey`, 32 bytes,
+> NULL → `A2G_DECISION_ERROR`). The tamper-evidence properties below are
+> preserved; only the key custodian changed.
 
-**Mechanism:**
+The `signed_binding_json` blob that crosses the C ABI between Phase 1 and Phase 2 is **signature-protected**. This prevents a C host from tampering with binding fields to extend TTLs or redirect escalation targets.
+
+**Mechanism (historical — pre-ADR-0015):**
 - A per-process ephemeral `ed25519` key is generated once at first use via `OnceLock<SigningKey>` using `OsRng`. It is never written to disk and never crosses the ABI.
 - On Phase 1 output, the FFI layer computes `"BINDING:{id}:{request_hash}:{escalate_to}:{ttl_unix_secs}"` and signs it with the process key. The signature is appended as `a2g_mac` (hex) in the binding JSON.
 - On Phase 2 re-entry, `verify_and_extract()` deserializes the JSON, recomputes the payload, and verifies the ed25519 signature. If verification fails for any reason (tampered field, truncated signature, foreign JSON), the function returns `A2G_DECISION_ERROR` immediately without calling into `a2g-core`.
@@ -106,7 +114,7 @@ The `binding_json` blob that crosses the C ABI between Phase 1 and Phase 2 is **
 **What this prevents:**
 - Extending `ttl_expires_at` to reuse an expired mandate window.
 - Changing `escalate_to` to redirect approval to a different authority.
-- Replaying a binding from a different process (different ephemeral key).
+- Replaying a binding the gateway never signed (forge attempt).
 
 **What this does not prevent:**
 - Replay within the same process before TTL expiry (that is the intended use).

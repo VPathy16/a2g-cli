@@ -87,6 +87,79 @@ pub struct ApprovalGrant {
     pub parent_receipt_hash: String,
 }
 
+/// A `PendingApprovalBinding` signed by the Enforcing Gateway's binding key
+/// (SPEC §9.7 SignBinding, §9.8 key ownership; ADR-0015).
+///
+/// Only the gateway holds the binding-signing key. The rich domain receives
+/// this blob opaquely from the gateway's `SignBinding` operation and presents
+/// it unmodified at Phase 2, where it is verified against the gateway's
+/// binding *verifying* key. The rich domain cannot manufacture a valid
+/// `SignedBinding` — it holds no signing key for bindings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedBinding {
+    /// The binding fields, flattened into the same JSON object.
+    #[serde(flatten)]
+    pub binding: PendingApprovalBinding,
+    /// Hex ed25519 signature by the gateway's binding-signing key over the
+    /// canonical CBOR `BindingPayload` (ADR-0011).
+    pub a2g_mac: String,
+}
+
+impl SignedBinding {
+    /// Canonical CBOR bytes covered by the binding signature (ADR-0011):
+    /// `["BINDING", binding_id, request_hash(bstr 32B), escalate_to, ttl_unix_secs]`.
+    pub fn payload_bytes(binding: &PendingApprovalBinding) -> Result<Vec<u8>, A2gError> {
+        let hash_bytes =
+            hex::decode(&binding.request_hash).map_err(|e| A2gError::HexDecode(e.to_string()))?;
+        encode_canonical(&crate::cbor::BindingPayload {
+            tag: "BINDING".to_string(),
+            binding_id: binding.binding_id.clone(),
+            request_hash: hash_bytes.into(),
+            escalate_to: binding.escalate_to.clone(),
+            ttl_unix_secs: binding.ttl_expires_at.timestamp(),
+        })
+    }
+
+    /// Sign a binding. Called by the Enforcing Gateway only — the binding
+    /// signing key MUST NOT exist in the rich domain (SPEC §9.8, §11.1).
+    pub fn sign(binding: &PendingApprovalBinding, key: &SigningKey) -> Result<Self, A2gError> {
+        let payload = Self::payload_bytes(binding)?;
+        let sig: Signature = key.sign(&payload);
+        Ok(SignedBinding {
+            binding: binding.clone(),
+            a2g_mac: hex::encode(sig.to_bytes()),
+        })
+    }
+
+    /// Verify the gateway signature and return the inner binding.
+    ///
+    /// Any field modification (including `ttl_expires_at`) invalidates the
+    /// signature and returns `A2gError::SignatureInvalid`.
+    pub fn verify(&self, verifying_key: &VerifyingKey) -> Result<PendingApprovalBinding, A2gError> {
+        let payload = Self::payload_bytes(&self.binding)?;
+        let sig_bytes =
+            hex::decode(&self.a2g_mac).map_err(|e| A2gError::HexDecode(e.to_string()))?;
+        let sig_arr: [u8; 64] = sig_bytes
+            .try_into()
+            .map_err(|_| A2gError::SignatureInvalid)?;
+        let sig = Signature::from_bytes(&sig_arr);
+        verifying_key
+            .verify(&payload, &sig)
+            .map_err(|_| A2gError::SignatureInvalid)?;
+        Ok(self.binding.clone())
+    }
+
+    /// Parse a signed-binding JSON blob and verify it in one step.
+    pub fn verify_json(
+        json: &str,
+        verifying_key: &VerifyingKey,
+    ) -> Result<PendingApprovalBinding, A2gError> {
+        let signed: SignedBinding = serde_json::from_str(json)
+            .map_err(|e| A2gError::Json(format!("signed binding JSON: {e}")))?;
+        signed.verify(verifying_key)
+    }
+}
+
 /// Compute the `request_hash` that binds an approval to a specific action.
 ///
 /// Payload: `"REQUEST:<mandate_hash>:<tool>:<params_hash>:<timestamp>"`.

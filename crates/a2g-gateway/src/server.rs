@@ -15,16 +15,21 @@
 //! state_trust but cannot be independently verified.
 
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use a2g_core::hitl::{ApprovalGrant, PendingApprovalBinding};
-use a2g_core::vehicle::{AttestedVehicleState, ATTESTATION_FRESHNESS_MS};
+use crate::transport;
+
+use a2g_core::hitl::{ApprovalGrant, PendingApprovalBinding, SignedBinding};
+use a2g_core::vehicle::{
+    classify_vehicle_tool, AttestedVehicleState, VehicleDomain, ATTESTATION_FRESHNESS_MS,
+};
 use chrono::Utc;
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+use crate::state_ingest::StateIngest;
 
 use crate::bus;
 use crate::forbidden;
@@ -50,15 +55,29 @@ pub struct GatewayState {
     pub demo_keys: DemoKeys,
     pub vcan_iface: String,
     pub pending: Mutex<PendingQueue>,
+    /// Gateway-ingested vehicle state (ADR-0016). Always present; only populated
+    /// with live CAN data when `--state-ingest` is passed at startup.
+    pub state_ingest: Arc<StateIngest>,
 }
 
 impl GatewayState {
     pub fn new(keys: GatewayKeys, demo_keys: DemoKeys, vcan_iface: &str) -> Self {
+        Self::new_with_queue(keys, demo_keys, vcan_iface, PendingQueue::new())
+    }
+
+    /// Construct with an explicit (possibly persisted) pending queue.
+    pub fn new_with_queue(
+        keys: GatewayKeys,
+        demo_keys: DemoKeys,
+        vcan_iface: &str,
+        queue: PendingQueue,
+    ) -> Self {
         GatewayState {
             keys,
             demo_keys,
             vcan_iface: vcan_iface.to_string(),
-            pending: Mutex::new(PendingQueue::new()),
+            pending: Mutex::new(queue),
+            state_ingest: Arc::new(StateIngest::new()),
         }
     }
 }
@@ -118,27 +137,22 @@ fn handle_connection(stream: std::os::unix::net::UnixStream, state: &Arc<Gateway
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap_or(());
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap_or(());
 
-    let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
-    let mut request_line = String::new();
+    let mut r = stream.try_clone().expect("clone stream for read");
+    let mut w = stream;
 
-    if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
-        return;
-    }
-
-    let response = match serde_json::from_str::<GatewayRequest>(request_line.trim()) {
+    let response = match transport::read_frame::<_, GatewayRequest>(&mut r) {
         Ok(req) => handle_request(req, state),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return, // clean disconnect
         Err(e) => GatewayResponse::Error {
-            message: format!("malformed request: {e}"),
+            message: format!("framing error: {e}"),
         },
     };
 
-    let mut out = stream;
-    let _ = writeln!(
-        out,
-        "{}",
-        serde_json::to_string(&response).unwrap_or_default()
-    );
+    let _ = transport::write_frame(&mut w, &response);
 }
 
 fn handle_request(req: GatewayRequest, state: &Arc<GatewayState>) -> GatewayResponse {
@@ -147,6 +161,9 @@ fn handle_request(req: GatewayRequest, state: &Arc<GatewayState>) -> GatewayResp
             receipt_verifying_key_hex: state.demo_keys.receipt_verifying_key_hex.clone(),
             attester_verifying_key_hex: state.demo_keys.attester_verifying_key_hex.clone(),
             operator_verifying_key_hex: state.demo_keys.operator_verifying_key_hex.clone(),
+            binding_verifying_key_hex: hex::encode(
+                state.keys.binding_signing_key.verifying_key().to_bytes(),
+            ),
         },
 
         GatewayRequest::SignBinding { binding_json } => handle_sign_binding(binding_json, state),
@@ -169,22 +186,15 @@ fn handle_sign_binding(binding_json: String, state: &Arc<GatewayState>) -> Gatew
         }
     };
 
-    // Sign with gateway's binding key (never shared — closes ADR-0009 interim).
-    let payload = match binding_bytes(&binding) {
-        Ok(b) => b,
+    // Sign with gateway's binding key (never shared — closes ADR-0009 interim;
+    // sole signer per ADR-0015 / SPEC §9.8).
+    let signed = match SignedBinding::sign(&binding, &state.keys.binding_signing_key) {
+        Ok(s) => s,
         Err(e) => {
             return GatewayResponse::Error {
                 message: format!("binding encoding error: {e}"),
             }
         }
-    };
-    let sig: ed25519_dalek::Signature = state.keys.binding_signing_key.sign(&payload);
-    let signed = SignedBindingWire {
-        binding_id: binding.binding_id.clone(),
-        request_hash: binding.request_hash.clone(),
-        escalate_to: binding.escalate_to.clone(),
-        ttl_expires_at: binding.ttl_expires_at.to_rfc3339(),
-        a2g_mac: hex::encode(sig.to_bytes()),
     };
 
     let signed_json = match serde_json::to_string(&signed) {
@@ -313,12 +323,27 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
     }
 
     // ── Step 5: Nonce not seen (anti-replay) ───────────────────────────────────
+    // The nonce ring catches within-session replays.  When persistence is active
+    // the high-water mark (= max issued_at_ms ever processed) is written to disk;
+    // on startup the queue checks hwm_gate() before the nonce ring so that a
+    // receipt from a previous session is rejected even if the nonce ring was
+    // cleared.
     {
         let mut q = state.pending.lock().unwrap();
+        // Post-restart HWM gate (only fires when queue was loaded from disk).
+        if let Some(hwm) = q.hwm_gate_ms() {
+            if receipt.issued_at_ms < hwm {
+                return refuse(&format!(
+                    "receipt timestamp ({}) is below the persisted nonce high-water \
+                     mark ({}); post-restart replay attempt rejected",
+                    receipt.issued_at_ms, hwm
+                ));
+            }
+        }
         if q.nonce_seen(&receipt.nonce_hex) {
             return refuse("receipt nonce has been seen before (replay attempt)");
         }
-        q.record_nonce(receipt.nonce_hex.clone());
+        q.record_nonce_with_ts(receipt.nonce_hex.clone(), receipt.issued_at_ms);
     }
 
     // ── Step 6: Action match ───────────────────────────────────────────────────
@@ -386,6 +411,47 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
         }
     }
 
+    // ── Gateway CAN state re-gate for Sensitive domain (ADR-0016) ─────────────
+    // The gateway independently re-checks vehicle state for Sensitive tools
+    // against its own ingested CAN frames, regardless of what the rich domain
+    // claimed.
+    //
+    // Three cases:
+    //  1. Fresh CAN data AND vehicle is moving → REFUSE.
+    //  2. Fresh CAN data AND vehicle is parked → pass through.
+    //  3a. No fresh CAN data AND reader was started (--state-ingest active) →
+    //      REFUSE fail-closed.  A bus timeout must not reopen GAP-1: once the
+    //      operator has opted into bus-verified re-gating, stale data is not
+    //      a legitimate fallback to operator-trusted state.
+    //  3b. No fresh CAN data AND reader was NOT started (no --state-ingest) →
+    //      warn-and-proceed for backward compatibility with pre-ADR-0016 deployments.
+    if classify_vehicle_tool(&receipt.tool) == VehicleDomain::Sensitive {
+        let (gw_state, fresh) = state.state_ingest.current_state(Instant::now());
+        if fresh {
+            if !gw_state.is_parked_and_stopped() {
+                return refuse(
+                    "state_authority_mismatch: gateway CAN state shows vehicle is not \
+                     parked and stopped; Sensitive tool refused",
+                );
+            }
+            // fresh + parked → fall through to bus write
+        } else if state.state_ingest.reader_active() {
+            // Case 3a: reader started but frames stale → fail-closed.
+            return refuse(
+                "state_authority_mismatch: --state-ingest reader is active but CAN frames \
+                 are stale (no valid frame within the freshness window); Sensitive \
+                 enforcement refused fail-closed (SPEC §6.6)",
+            );
+        } else if receipt.state_trust == "operator_trusted" {
+            // Case 3b: reader never started → backward-compat warn-and-proceed.
+            eprintln!(
+                "[gateway] WARN: Sensitive tool '{}' proceeding with operator_trusted state \
+                 (no fresh gateway CAN data); use --state-ingest for bus-verified re-gating",
+                receipt.tool
+            );
+        }
+    }
+
     // ── All checks passed → write to bus ──────────────────────────────────────
     let (frame_hex, real_write) =
         bus::write_enforcement_frame(&state.vcan_iface, &receipt.verdict_id, &receipt.tool);
@@ -405,50 +471,16 @@ fn refuse(reason: &str) -> GatewayResponse {
 }
 
 // ── SignedBinding wire format ─────────────────────────────────────────────────
-
-/// Wire format for the signed binding blob (matches a2g-ffi's SignedBinding).
-/// The gateway is now the authoritative signer (closes ADR-0009 §binding-key interim).
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SignedBindingWire {
-    binding_id: String,
-    request_hash: String,
-    escalate_to: String,
-    ttl_expires_at: String,
-    /// Hex ed25519 signature over `binding_payload()`.
-    a2g_mac: String,
-}
-
-/// Canonical CBOR bytes signed by the gateway's binding key (ADR-0011).
-fn binding_bytes(b: &PendingApprovalBinding) -> Result<Vec<u8>, a2g_core::A2gError> {
-    let hash_bytes =
-        hex::decode(&b.request_hash).map_err(|e| a2g_core::A2gError::HexDecode(e.to_string()))?;
-    a2g_core::cbor::encode_canonical(&a2g_core::cbor::BindingPayload {
-        tag: "BINDING".to_string(),
-        binding_id: b.binding_id.clone(),
-        request_hash: hash_bytes.into(),
-        escalate_to: b.escalate_to.clone(),
-        ttl_unix_secs: b.ttl_expires_at.timestamp(),
-    })
-}
+// The wire type is `a2g_core::hitl::SignedBinding` — one shared definition for
+// the gateway (signer) and the rich domain (verifier). The gateway is the sole
+// signer (ADR-0015; closes ADR-0009 §binding-key interim).
 
 /// Verify a signed binding blob produced by this gateway (used by Phase 2 receipt signers).
 pub fn verify_signed_binding(
     signed_json: &str,
     binding_key_verifying: &VerifyingKey,
 ) -> Option<PendingApprovalBinding> {
-    let wire: SignedBindingWire = serde_json::from_str(signed_json).ok()?;
-    let ttl = wire.ttl_expires_at.parse::<chrono::DateTime<Utc>>().ok()?;
-    let binding = PendingApprovalBinding {
-        binding_id: wire.binding_id.clone(),
-        request_hash: wire.request_hash.clone(),
-        escalate_to: wire.escalate_to.clone(),
-        ttl_expires_at: ttl,
-    };
-    let payload = binding_bytes(&binding).ok()?;
-    let sig_bytes: [u8; 64] = hex::decode(&wire.a2g_mac).ok()?.try_into().ok()?;
-    let sig = Signature::from_bytes(&sig_bytes);
-    binding_key_verifying.verify(&payload, &sig).ok()?;
-    Some(binding)
+    SignedBinding::verify_json(signed_json, binding_key_verifying).ok()
 }
 
 /// Set of nonces from the most recent batch (used by test helpers to verify anti-replay).

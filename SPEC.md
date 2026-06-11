@@ -1196,10 +1196,13 @@ implementation's test suite as a proxy.
 
 ### 11.1 Key Custody
 
-**Current status:** In the demo tier, the binding-signing key lives in the rich
-domain process (in-process ephemeral key). This is an explicitly interim arrangement
-labeled "DEMO ONLY." In this configuration, the process that requests an action
-holds the key that signs the binding — a circular trust assumption.
+**Current status:** The binding-signing key resides in the Enforcing Gateway
+(ADR-0015). The rich domain (`a2g-ffi`, CLI) holds only the gateway's binding
+*verifying* key; Phase 1 emits an unsigned `PendingApprovalBinding` that the
+rich domain presents to the gateway's SignBinding operation, and Phase 2
+verifies the gateway-signed blob against the verifying key. The former
+in-process ephemeral key ("DEMO ONLY" `OnceLock<SigningKey>` in `a2g-ffi`) has
+been removed.
 
 **Normative requirement:** In a production deployment, the binding-signing key
 MUST reside in the Enforcing Gateway (§9.8). The rich domain MUST hold only the
@@ -1307,19 +1310,28 @@ This appendix records known divergences between the normative requirements of th
 specification and the current reference implementation. These divergences do not
 weaken the normative text; they identify work needed to achieve full conformance.
 
-### A.1 Binding-Signing Key in the Rich Domain (Demo Tier)
+### A.1 Binding-Signing Key in the Rich Domain (Demo Tier) — RESOLVED
 
 **Normative (§9.8, §11.1):** The binding-signing key MUST reside in the Enforcing
 Gateway.
 
-**Current implementation status:** In the demo tier, the binding-signing key is
-an ephemeral `OnceLock<SigningKey>` in the FFI layer (`a2g-ffi`), living in the
-rich domain. This is labeled "DEMO ONLY" in the code and is sufficient for
-end-to-end demonstration of the protocol. It is not suitable for production.
+**Resolution (ADR-0015):** The binding-signing key now resides exclusively in
+`a2g-gateway`. The arrangement is:
 
-**Impact:** Level 2 and Level 3 conformance requires moving the binding-signing
-key into the gateway. The gateway implementation (`a2g-gateway`) is the intended
-home for this key; the migration is planned as a follow-on.
+- The gateway generates (dev tier) or loads from a provisioned keystore
+  (`--production --keystore <path>`) the binding-signing key at startup. The
+  private key never crosses the gateway boundary.
+- The rich domain (`a2g-ffi`) holds only the gateway's binding *verifying* key.
+  The former `OnceLock<SigningKey>` has been removed from `a2g-ffi` entirely.
+- Phase 1 (`a2g_decide`) returns the **unsigned** binding; the rich domain
+  submits it to the gateway's `SignBinding` operation (§9.7), which validates,
+  signs the canonical CBOR `BindingPayload` (ADR-0011), queues the entry, and
+  returns the signed blob.
+- Phase 2 (`a2g_decide_with_approval`) takes the gateway-signed blob plus the
+  gateway's 32-byte binding verifying key; a NULL key or a blob not signed by
+  the gateway returns `A2G_DECISION_ERROR`.
+- A gateway started with `--production` and no provisioned keystore refuses to
+  start (§10.1 Level 3).
 
 ### A.2 Operator Identity Infrastructure
 
