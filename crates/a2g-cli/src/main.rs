@@ -987,7 +987,13 @@ fn cmd_enforce(
     }
 
     // Run enforcement
-    let mut verdict = enforce::enforce(&mandate_cbor, tool, &params, &db)?;
+    let mut verdict = enforce::enforce(
+        &mandate_cbor,
+        tool,
+        &params,
+        &db,
+        &enforce::TrustAnchor::SelfSovereign,
+    )?;
 
     // Phase 2: Set authority lineage on verdict
     verdict.delegation_chain_hash = delegation_chain_hash_val;

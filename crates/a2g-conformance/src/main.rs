@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 
-use a2g_core::enforce::{decide, decide_with_approval, Decision};
+use a2g_core::enforce::{decide, decide_with_approval, Decision, TrustAnchor};
 use a2g_core::hitl::ApprovalGrant;
 use a2g_core::identity::generate_agent_keypair;
 use a2g_core::ledger::NoopLedger;
@@ -73,6 +73,7 @@ struct VectorInput {
     clock_offset_seconds: i64,
     phase2_grant_type: Option<String>,
     gateway_test_type: Option<String>,
+    trust_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,16 +319,19 @@ fn run_vector_inner(v: &TestVector) -> Outcome {
     let input = &v.input;
 
     // ── Build mandate ──────────────────────────────────────────────────────────
-    let mandate_cbor: Vec<u8> = if input.mandate_use_spec_signing {
-        build_spec_signed_mandate(input)
-    } else {
-        let (cbor, _) = build_mandate(input);
-        if input.mandate_bad_signature {
-            tamper_mandate_cbor(&cbor)
+    let (mandate_cbor, mandate_issuer_pubkey): (Vec<u8>, Option<[u8; 32]>) =
+        if input.mandate_use_spec_signing {
+            (build_spec_signed_mandate(input), None)
         } else {
-            cbor
-        }
-    };
+            let (cbor, signing_key) = build_mandate(input);
+            let pk = signing_key.verifying_key().to_bytes();
+            let final_cbor = if input.mandate_bad_signature {
+                tamper_mandate_cbor(&cbor)
+            } else {
+                cbor
+            };
+            (final_cbor, Some(pk))
+        };
 
     // ── Vehicle state ──────────────────────────────────────────────────────────
     let vehicle_state = build_vehicle_state(input);
@@ -345,6 +349,20 @@ fn run_vector_inner(v: &TestVector) -> Outcome {
         return run_phase2_vector(v, &mandate_cbor, vehicle_state.as_ref(), now, grant_type);
     }
 
+    // ── Trust anchor (ADR-0014) ────────────────────────────────────────────────
+    // trust_mode: null/"self_sovereign" → SelfSovereign
+    //             "roots_match"         → Roots([issuer pubkey])
+    //             "roots_mismatch"      → Roots([[0xab; 32]])  ← always rejected
+    let roots_buf: Option<Vec<[u8; 32]>> = match input.trust_mode.as_deref() {
+        Some("roots_match") => Some(vec![mandate_issuer_pubkey.unwrap_or([0u8; 32])]),
+        Some("roots_mismatch") => Some(vec![[0xab; 32]]),
+        _ => None,
+    };
+    let trust_anchor = match &roots_buf {
+        Some(roots) => TrustAnchor::Roots(roots.as_slice()),
+        None => TrustAnchor::SelfSovereign,
+    };
+
     // ── Standard decide() path ────────────────────────────────────────────────
     let params = &input.params;
     let verdict = match decide(
@@ -354,6 +372,7 @@ fn run_vector_inner(v: &TestVector) -> Outcome {
         &NoopLedger,
         now,
         vehicle_state.as_ref(),
+        &trust_anchor,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -387,6 +406,7 @@ fn run_phase2_vector(
         &NoopLedger,
         now,
         vehicle_state,
+        &TrustAnchor::SelfSovereign,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -510,6 +530,7 @@ fn run_phase2_vector(
         vehicle_state,
         &binding,
         &grant,
+        &TrustAnchor::SelfSovereign,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -562,6 +583,7 @@ fn run_gateway_vector(
                 &NoopLedger,
                 now,
                 vehicle_state,
+                &TrustAnchor::SelfSovereign,
             ) {
                 Ok(v) => v,
                 Err(e) => {
@@ -677,6 +699,7 @@ fn run_gateway_vector(
                 &NoopLedger,
                 now,
                 vehicle_state,
+                &TrustAnchor::SelfSovereign,
             ) {
                 Ok(v) => v,
                 Err(e) => return Outcome::Fail(format!("decide() error: {e}")),
@@ -725,6 +748,7 @@ fn run_gateway_vector(
                 &NoopLedger,
                 now,
                 vehicle_state,
+                &TrustAnchor::SelfSovereign,
             ) {
                 Ok(v) => v,
                 Err(e) => return Outcome::Fail(format!("decide() error: {e}")),
@@ -859,6 +883,7 @@ fn run_gateway_vector(
                 &NoopLedger,
                 now,
                 vehicle_state,
+                &TrustAnchor::SelfSovereign,
             ) {
                 Ok(v) => v,
                 Err(e) => return Outcome::Fail(format!("decide() error: {e}")),
@@ -909,6 +934,7 @@ fn run_gateway_vector(
                 &NoopLedger,
                 now,
                 vehicle_state,
+                &TrustAnchor::SelfSovereign,
             ) {
                 Ok(v) => v,
                 Err(e) => return Outcome::Fail(format!("decide() error: {e}")),

@@ -36,26 +36,43 @@ The variant values are **ABI-stable** and must not be reordered. Additions must 
 
 ### Opaque handles
 
-Two opaque struct types are exposed as forward-declared pointers:
+Three opaque struct types are exposed as forward-declared pointers:
 
 - `A2gVerdictHandle` — holds a `Verdict` plus cached `CString` accessors. Obtained from `a2g_decide` or `a2g_decide_with_approval`. Freed with `a2g_verdict_free`.
 - `A2gVerifiedStateHandle` — wraps an operator-trusted `VerifiedVehicleState`. Obtained from `a2g_verified_state_operator_trusted`. Freed with `a2g_verified_state_free`.
+- `A2gTrustAnchorHandle` — declares which mandate issuers are accepted (ADR-0014). Obtained from `a2g_trust_anchor_self_sovereign()` or `a2g_trust_anchor_roots()`. Freed with `a2g_trust_anchor_free`. Passing NULL to `a2g_decide` / `a2g_decide_with_approval` returns `A2G_DECISION_ERROR` immediately — there is no implicit default trust mode (fail-explicit).
 
 The Rust structs are not `#[repr(C)]`; C sees only forward declarations. The host process never dereferences them.
+
+### Trust anchor constructors
+
+```c
+A2gTrustAnchorHandle *a2g_trust_anchor_self_sovereign(void);
+A2gTrustAnchorHandle *a2g_trust_anchor_roots(const uint8_t *pubkeys_flat, uintptr_t count);
+void                  a2g_trust_anchor_free(A2gTrustAnchorHandle *handle);
+```
+
+`a2g_trust_anchor_self_sovereign` is an explicit opt-in for testing — it accepts any self-consistent mandate. Production deployments should use `a2g_trust_anchor_roots` with their issuer public keys.
+
+`a2g_trust_anchor_roots` takes `count * 32` contiguous bytes of ed25519 public keys. Returns NULL if `pubkeys_flat` is NULL or `count` is zero.
+
+**The FFI does not own keys** — the handle holds a copy of the host-supplied bytes. No private key material crosses the ABI.
 
 ### Phase 1: `a2g_decide`
 
 ```c
 A2gDecision a2g_decide(
-    const char *mandate_toml,
+    const uint8_t *mandate_cbor,
+    uintptr_t mandate_cbor_len,
     const char *tool,
     const char *params_json,
     const A2gVerifiedStateHandle *state,  /* NULL → fail-safe */
+    const A2gTrustAnchorHandle *trust,    /* must not be NULL — fail-explicit */
     A2gVerdictHandle **out_verdict
 );
 ```
 
-Runs the full 8-step enforcement pipeline. No I/O; no blocking. `*out_verdict` is always written; never NULL on return.
+Runs the full enforcement pipeline. No I/O; no blocking. `*out_verdict` is always written; never NULL on return. Passing `NULL` for `trust` returns `A2G_DECISION_ERROR` immediately.
 
 On `A2G_DECISION_PENDING_APPROVAL`, the binding JSON is available via `a2g_verdict_binding_json`. Pass it **unmodified** to Phase 2 together with the grant.
 
@@ -63,12 +80,14 @@ On `A2G_DECISION_PENDING_APPROVAL`, the binding JSON is available via `a2g_verdi
 
 ```c
 A2gDecision a2g_decide_with_approval(
-    const char *mandate_toml,
+    const uint8_t *mandate_cbor,
+    uintptr_t mandate_cbor_len,
     const char *tool,
     const char *params_json,
     const A2gVerifiedStateHandle *state,
-    const char *binding_json,  /* JSON of PendingApprovalBinding from Phase 1 */
-    const char *grant_json,    /* JSON of ApprovalGrant from human approver */
+    const char *binding_json,             /* MAC-protected binding from Phase 1 */
+    const char *grant_json,               /* JSON ApprovalGrant from human approver */
+    const A2gTrustAnchorHandle *trust,    /* same handle as Phase 1 recommended */
     A2gVerdictHandle **out_verdict
 );
 ```
@@ -102,6 +121,8 @@ No private keys, signing operations, or cryptographic secrets cross the ABI. Att
 - The `a2g_core::identity` key-generation functions
 
 The only state-creation function is `a2g_verified_state_operator_trusted` (explicitly interim, named "operator_trusted"). This communicates to the caller that they are asserting trust, not proving it cryptographically. Refer to ADR-0007 §4.
+
+The `A2gTrustAnchorHandle` holds the host-supplied **public** key bytes (32 bytes per ed25519 key). It does not hold or expose private key material. The distinction from ADR-0013 is clear: ADR-0013 says "the FFI does not perform signing"; ADR-0014 says "the FFI enforces the host's trust decision" — these responsibilities are complementary and do not overlap.
 
 ### Verified state handle contract
 

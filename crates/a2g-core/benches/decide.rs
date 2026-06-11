@@ -1,6 +1,6 @@
 use a2g_core::{
     cbor::{encode_canonical, CborMandate, MandateTbs},
-    enforce::decide,
+    enforce::{decide, TrustAnchor},
     identity,
     ledger::EnforceLedger,
     mandate::capabilities_hash,
@@ -98,7 +98,16 @@ fn bench_decide_allow(c: &mut Criterion) {
 
     c.bench_function("decide_allow (read_file)", |b| {
         b.iter(|| {
-            let verdict = decide(&cbor, "read_file", &params, &ledger, now, None).unwrap();
+            let verdict = decide(
+                &cbor,
+                "read_file",
+                &params,
+                &ledger,
+                now,
+                None,
+                &TrustAnchor::SelfSovereign,
+            )
+            .unwrap();
             // read_file is in the mandate's tools list → ALLOW
             std::hint::black_box(verdict);
         });
@@ -113,7 +122,16 @@ fn bench_decide_deny_unknown_tool(c: &mut Criterion) {
 
     c.bench_function("decide_deny (unknown_tool)", |b| {
         b.iter(|| {
-            let verdict = decide(&cbor, "delete_database", &params, &ledger, now, None).unwrap();
+            let verdict = decide(
+                &cbor,
+                "delete_database",
+                &params,
+                &ledger,
+                now,
+                None,
+                &TrustAnchor::SelfSovereign,
+            )
+            .unwrap();
             std::hint::black_box(verdict);
         });
     });

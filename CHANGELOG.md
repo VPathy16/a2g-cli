@@ -8,6 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Breaking
 
+- **Issuer trust enforcement added to the decision pipeline (ADR-0014)**
+  — `decide()`, `enforce()`, and `decide_with_approval()` in `a2g-core` gain a
+  mandatory `trust: &TrustAnchor<'_>` parameter. The FFI ABI gains
+  `const A2gTrustAnchorHandle *trust` on `a2g_decide` and
+  `a2g_decide_with_approval`; passing NULL returns `A2G_DECISION_ERROR`
+  immediately (fail-explicit, no implicit default).
+  - New `TrustAnchor<'a>` enum in `a2g_core::enforce`:
+    `SelfSovereign` | `Roots(&[[u8;32]])` | `Chain { trusted_roots, chain }`.
+  - New FFI constructors: `a2g_trust_anchor_self_sovereign()`,
+    `a2g_trust_anchor_roots(pubkeys_flat, count)`.
+  - New FFI destructor: `a2g_trust_anchor_free(handle)`.
+  - New error variant: `A2gError::IssuerUntrusted`.
+  - Enforcement order: forbidden pre-check → Step 0 revocation → Step 1
+    signature → **Step 1.5 issuer trust (new)** → Step 2 TTL → Steps 3–7.
+  - The Forbidden-domain pre-check still fires before issuer-trust — untrusted
+    mandates cannot execute Forbidden-domain tools.
+  - `SelfSovereign` is an explicit named opt-in; it is not the default.
+  - Three conformance vectors added: `09-issuer-trust/it-001` through `it-003`.
+
 - **Mandate distribution format changed to canonical CBOR (ADR-0013)**
   — mandates compile to signed CBOR for distribution and verification. TOML is the authoring format only (CLI layer). Resolves no_std Blocker #2 (`toml` removed from `a2g-core`).
   - `decide()`, `enforce()`, `decide_with_approval()` now accept `mandate_cbor: &[u8]` instead of `mandate_str: &str`. All call sites updated.

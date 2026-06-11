@@ -14,7 +14,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
-use a2g_core::enforce::{decide, decide_with_approval};
+use a2g_core::enforce::{decide, decide_with_approval, TrustAnchor};
 use a2g_core::hitl::ApprovalGrant;
 use a2g_core::ledger::NoopLedger;
 use a2g_core::vehicle::{Actor, Gear, VehicleState, VerifiedVehicleState};
@@ -121,7 +121,16 @@ fn beat1_comfort_allow(socket_path: &Path, demo_keys: &DemoKeys) -> GatewayRespo
     println!();
 
     let params: serde_json::Value = serde_json::from_str(params_json).unwrap();
-    let verdict = decide(&mandate, tool, &params, &NoopLedger, Utc::now(), None).unwrap();
+    let verdict = decide(
+        &mandate,
+        tool,
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        None,
+        &TrustAnchor::SelfSovereign,
+    )
+    .unwrap();
 
     println!(
         "  {YELLOW}[CORE]{RESET}  decision:    {BOLD}{}{RESET}",
@@ -215,6 +224,7 @@ fn beat2_state_gated_deny(socket_path: &Path, demo_keys: &DemoKeys) -> String {
         &NoopLedger,
         Utc::now(),
         Some(&moving),
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
 
@@ -359,6 +369,7 @@ fn beat4_hitl_door_unlock(socket_path: &Path, demo_keys: &DemoKeys) -> GatewayRe
         &NoopLedger,
         Utc::now(),
         Some(&parked),
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
 
@@ -448,6 +459,7 @@ fn beat4_hitl_door_unlock(socket_path: &Path, demo_keys: &DemoKeys) -> GatewayRe
         Some(&parked),
         binding,
         &grant,
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
 

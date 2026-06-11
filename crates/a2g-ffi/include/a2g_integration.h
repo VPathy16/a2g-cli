@@ -50,6 +50,11 @@
  *  A2gVerifiedStateHandle *   a2g_verified_state_  a2g_verified_state_free()
  *                             operator_trusted()
  *
+ *  A2gTrustAnchorHandle *     a2g_trust_anchor_    a2g_trust_anchor_free()
+ *                             self_sovereign()
+ *                             a2g_trust_anchor_
+ *                             roots()
+ *
  *  uint8_t * (mandate CBOR)   a2g_test_mandate_    a2g_cbor_free(ptr, len)
  *                             cbor()
  *
@@ -84,7 +89,7 @@
  *
  *   3. When the human approver returns a signed ApprovalGrant JSON, call:
  *        a2g_decide_with_approval(cbor, cbor_len, tool, params, state,
- *                                 binding, grant_json, &out_verdict);
+ *                                 binding, grant_json, trust, &out_verdict);
  *
  *   Do NOT modify any field of binding_json between steps 1 and 3.  The MAC
  *   covers every field; any modification returns A2G_DECISION_ERROR.

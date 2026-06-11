@@ -13,7 +13,7 @@
 //! - `test_attested_state_verified_at_gateway`    — "attested" state_trust verified by gateway
 //! - `test_attested_state_stale_rejected`         — stale attestation rejected despite valid sig
 
-use a2g_core::enforce::{decide, decide_with_approval, Decision};
+use a2g_core::enforce::{decide, decide_with_approval, Decision, TrustAnchor};
 use a2g_core::hitl::ApprovalGrant;
 use a2g_core::ledger::NoopLedger;
 use a2g_core::vehicle::{
@@ -227,6 +227,7 @@ fn test_comfort_allow_produces_frame() {
         &NoopLedger,
         Utc::now(),
         None,
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
     assert_eq!(
@@ -302,6 +303,7 @@ fn test_tampered_receipt_refused() {
         &NoopLedger,
         Utc::now(),
         None,
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
 
@@ -333,6 +335,7 @@ fn test_tampered_params_request_hash_refused() {
         &NoopLedger,
         Utc::now(),
         None,
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
 
@@ -362,6 +365,7 @@ fn test_replayed_receipt_refused() {
         &NoopLedger,
         Utc::now(),
         None,
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
 
@@ -399,6 +403,7 @@ fn test_stale_receipt_refused() {
         &NoopLedger,
         Utc::now(),
         None,
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
 
@@ -455,6 +460,7 @@ fn test_deny_verdict_refused() {
         &NoopLedger,
         Utc::now(),
         Some(&parked_state()),
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
     assert_eq!(verdict.decision, Decision::Deny);
@@ -478,6 +484,7 @@ fn test_sensitive_moving_denied_by_core() {
         &NoopLedger,
         Utc::now(),
         Some(&moving_state()),
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
     assert_eq!(
@@ -501,6 +508,7 @@ fn test_sensitive_parked_hitl_full_flow() {
         &NoopLedger,
         Utc::now(),
         Some(&parked_state()),
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
     assert_eq!(
@@ -558,6 +566,7 @@ fn test_sensitive_parked_hitl_full_flow() {
         Some(&parked_state()),
         &binding,
         &grant,
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
     assert_eq!(v2.decision, Decision::Allow, "Phase 2 must be ALLOW");
@@ -603,6 +612,7 @@ fn test_attested_state_verified_at_gateway() {
         &NoopLedger,
         Utc::now(),
         Some(&verified),
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
     // With escalate_tools, parked sensitive → PendingApproval (not ALLOW yet).
@@ -639,6 +649,7 @@ fn test_attested_state_stale_rejected_by_gateway() {
         &NoopLedger,
         Utc::now(),
         Some(&op_state),
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
 
@@ -766,6 +777,7 @@ fn test_vcan_real_frame_and_no_frame_on_refused() {
         &NoopLedger,
         Utc::now(),
         None,
+        &TrustAnchor::SelfSovereign,
     )
     .unwrap();
     let resp = enforce(&gw, &verdict, "{}");

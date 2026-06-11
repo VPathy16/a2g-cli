@@ -64,7 +64,8 @@ static void print_verdict(const A2gVerdictHandle *h) {
  * vehicle state.  We pass operator-trusted vehicle state here to show that the
  * state_trust field is populated on the verdict.
  */
-static void demo_allow(const uint8_t *cbor, uintptr_t cbor_len) {
+static void demo_allow(const uint8_t *cbor, uintptr_t cbor_len,
+                       A2gTrustAnchorHandle *trust) {
     printf("\n=== Demo 1: ALLOW (read_file, parked, driver) ===\n");
 
     /* Create an operator-trusted vehicle state: parked (gear=0), 0 km/h, driver (actor=0).
@@ -80,7 +81,7 @@ static void demo_allow(const uint8_t *cbor, uintptr_t cbor_len) {
     }
 
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(cbor, cbor_len, "read_file", "{}", state, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "read_file", "{}", state, trust, &verdict);
 
     assert(verdict != NULL);
     print_verdict(verdict);
@@ -109,11 +110,12 @@ static void demo_allow(const uint8_t *cbor, uintptr_t cbor_len) {
  * delete_all_data is hard-denied before any mandate check — no mandate content
  * can override a Forbidden-domain classification.  No vehicle state is needed.
  */
-static void demo_deny(const uint8_t *cbor, uintptr_t cbor_len) {
-    printf("\n=== Demo 2: DENY (delete_all_data, forbidden domain) ===\n");
+static void demo_deny(const uint8_t *cbor, uintptr_t cbor_len,
+                      A2gTrustAnchorHandle *trust) {
+    printf("\n=== Demo 2: DENY (delete_all_data, not authorized) ===\n");
 
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(cbor, cbor_len, "delete_all_data", "{}", NULL, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "delete_all_data", "{}", NULL, trust, &verdict);
 
     assert(verdict != NULL);
     print_verdict(verdict);
@@ -149,9 +151,10 @@ static int demo_dispatch(const uint8_t *cbor,
                          uintptr_t cbor_len,
                          const char *tool,
                          const char *params_json,
-                         A2gVerifiedStateHandle *state) {
+                         A2gVerifiedStateHandle *state,
+                         A2gTrustAnchorHandle *trust) {
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(cbor, cbor_len, tool, params_json, state, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, tool, params_json, state, trust, &verdict);
 
     assert(verdict != NULL);  /* always written, even on error */
 
@@ -203,7 +206,7 @@ static int demo_dispatch(const uint8_t *cbor,
          *   A2gVerdictHandle *verdict2 = NULL;
          *   A2gDecision d2 = a2g_decide_with_approval(
          *       cbor, cbor_len, tool, params_json, state,
-         *       binding_json, grant_json, &verdict2);
+         *       binding_json, grant_json, trust, &verdict2);
          *   if (d2 == A2G_DECISION_ALLOW) { forward_to_enforcing_writer(); }
          *   a2g_verdict_free(verdict2);
          *
@@ -225,15 +228,24 @@ static int demo_dispatch(const uint8_t *cbor,
     return 0;
 }
 
-/* ── Demo 4: Error handling (NULL mandate, invalid state params) ───────────── */
+/* ── Demo 4: Error handling (NULL mandate, NULL trust, invalid state params) ── */
 
-static void demo_error_paths(void) {
+static void demo_error_paths(A2gTrustAnchorHandle *trust) {
     printf("\n=== Demo 4: Error handling ===\n");
+
+    /* NULL trust → A2G_DECISION_ERROR (fail-explicit, ADR-0014) */
+    {
+        A2gVerdictHandle *verdict = NULL;
+        A2gDecision d = a2g_decide(NULL, 0, "read_file", "{}", NULL, NULL, &verdict);
+        assert(d == A2G_DECISION_ERROR && verdict != NULL);
+        printf("  NULL trust              → %s  [PASS] (fail-explicit)\n", decision_name(d));
+        a2g_verdict_free(verdict);
+    }
 
     /* NULL mandate bytes → A2G_DECISION_ERROR (never crashes, returns error verdict) */
     {
         A2gVerdictHandle *verdict = NULL;
-        A2gDecision d = a2g_decide(NULL, 0, "read_file", "{}", NULL, &verdict);
+        A2gDecision d = a2g_decide(NULL, 0, "read_file", "{}", NULL, trust, &verdict);
         assert(d == A2G_DECISION_ERROR && verdict != NULL);
         printf("  NULL mandate            → %s  [PASS]\n", decision_name(d));
         a2g_verdict_free(verdict);
@@ -275,11 +287,21 @@ int main(void) {
     }
     printf("Mandate obtained (%zu bytes)\n", (size_t)cbor_len);
 
+    /* Create a SelfSovereign trust anchor (ADR-0014).
+     * In production, use a2g_trust_anchor_roots() with your issuer pubkeys.
+     * SelfSovereign is an explicit opt-in for local testing only. */
+    A2gTrustAnchorHandle *trust = a2g_trust_anchor_self_sovereign();
+    if (trust == NULL) {
+        fprintf(stderr, "FATAL: a2g_trust_anchor_self_sovereign() returned NULL\n");
+        return 1;
+    }
+    printf("Trust anchor created (SelfSovereign)\n");
+
     /* Demo 1: ALLOW */
-    demo_allow(cbor, cbor_len);
+    demo_allow(cbor, cbor_len, trust);
 
     /* Demo 2: DENY */
-    demo_deny(cbor, cbor_len);
+    demo_deny(cbor, cbor_len, trust);
 
     /* Demo 3: Full dispatch showing all four verdict types.
      *
@@ -294,19 +316,20 @@ int main(void) {
             a2g_verified_state_operator_trusted(0.0, 0, 0);
         assert(state != NULL);
 
-        demo_dispatch(cbor, cbor_len, "read_file",  "{}", state);
-        demo_dispatch(cbor, cbor_len, "write_file", "{\"path\":\"workspace/output/log.txt\"}", state);
+        demo_dispatch(cbor, cbor_len, "read_file",  "{}", state, trust);
+        demo_dispatch(cbor, cbor_len, "write_file", "{\"path\":\"workspace/output/log.txt\"}", state, trust);
 
-        /* Forbidden tool — always DENY regardless of state or mandate content. */
-        demo_dispatch(cbor, cbor_len, "delete_all_data", "{}", state);
+        /* Unauthorized tool — DENY because it is not in the capabilities list. */
+        demo_dispatch(cbor, cbor_len, "delete_all_data", "{}", state, trust);
 
         a2g_verified_state_free(state);
     }
 
     /* Demo 4: Error paths */
-    demo_error_paths();
+    demo_error_paths(trust);
 
-    /* Free the CBOR mandate buffer with a2g_cbor_free — not free(). */
+    /* Free handles in any order. */
+    a2g_trust_anchor_free(trust);
     a2g_cbor_free(cbor, cbor_len);
 
     printf("\nAll demos completed successfully.\n");
