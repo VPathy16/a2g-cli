@@ -1,12 +1,16 @@
 [package]
 name = "a2g-gateway"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Enforcing Gateway (ADR-0010) — sole writer to the vehicle bus, separate trust domain"
 
 [[bin]]
 name = "a2g-gateway"
 path = "src/main.rs"
+
+[[bin]]
+name = "a2g-state-sim"
+path = "src/state_sim.rs"
 
 [lib]
 name = "a2g_gateway"
@@ -16,6 +20,7 @@ path = "src/lib.rs"
 a2g-core = { path = "../a2g-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ciborium = { workspace = true }
 chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }

@@ -1,14 +1,19 @@
 [package]
 name = "a2g-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Deterministic governance engine for autonomous AI agents (no I/O, no SQLite)"
 license = "MIT"
 
 [features]
 # std is on by default. Disable for no_std exploration (blocked — see docs/no_std-blockers.md).
-default = ["std"]
+default = ["std", "operator-state"]
 std = []
+# Allows constructing VerifiedVehicleState from operator-asserted (non-attested)
+# values via from_operator_trusted(). On by default for dev/CLI use; production
+# builds disable it so only gateway-verified attested state reaches decide()
+# (ADR-0016).
+operator-state = []
 
 [dependencies]
 ed25519-dalek = { workspace = true }

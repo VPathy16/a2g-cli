@@ -16,7 +16,9 @@
 //!                    Level 3). No demo key file is written.
 
 use a2g_gateway::keys::{DemoKeys, GatewayKeys};
+use a2g_gateway::pending::PendingQueue;
 use a2g_gateway::server::{serve, GatewayState};
+use a2g_gateway::state_ingest::{spawn_reader, DEFAULT_GEAR_CAN_ID, DEFAULT_SPEED_CAN_ID};
 use a2g_gateway::{DEFAULT_DEMO_KEY_PATH, DEFAULT_SOCKET_PATH, DEFAULT_VCAN_IFACE};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -27,6 +29,11 @@ fn main() {
     let vcan_iface = flag_value(&args, "--vcan").unwrap_or(DEFAULT_VCAN_IFACE.to_string());
     let key_path = flag_value(&args, "--keys").unwrap_or(DEFAULT_DEMO_KEY_PATH.to_string());
     let production = args.iter().any(|a| a == "--production");
+    // --state-ingest: start the background SocketCAN reader for gateway-side state
+    // verification (ADR-0016). Uses --vcan as the interface by default.
+    let state_ingest = args.iter().any(|a| a == "--state-ingest");
+    // --queue-persist <path>: persist the pending queue and nonce HWM to disk (P3).
+    let queue_persist_path = flag_value(&args, "--queue-persist");
 
     let (gateway_keys, demo_keys): (GatewayKeys, DemoKeys) = if production {
         // Production mode: a provisioned keystore is mandatory. Fail-explicit —
@@ -77,7 +84,23 @@ fn main() {
         &demo_keys.receipt_verifying_key_hex[..16]
     );
 
-    let state = Arc::new(GatewayState::new(gateway_keys, demo_keys, &vcan_iface));
+    let pending = match queue_persist_path {
+        Some(ref p) => {
+            eprintln!("[gateway] queue persistence: {p}");
+            PendingQueue::with_persist(&PathBuf::from(p))
+        }
+        None => PendingQueue::new(),
+    };
+    let state = Arc::new(GatewayState::new_with_queue(gateway_keys, demo_keys, &vcan_iface, pending));
+
+    if state_ingest {
+        let ingest = Arc::clone(&state.state_ingest);
+        spawn_reader(ingest, vcan_iface.clone(), DEFAULT_SPEED_CAN_ID, DEFAULT_GEAR_CAN_ID);
+        eprintln!(
+            "[gateway] state-ingest: subscribing to {vcan_iface} \
+             (speed=0x{DEFAULT_SPEED_CAN_ID:03X} gear=0x{DEFAULT_GEAR_CAN_ID:03X})"
+        );
+    }
 
     let (_ready_tx, ready_rx) = mpsc::channel::<()>();
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();

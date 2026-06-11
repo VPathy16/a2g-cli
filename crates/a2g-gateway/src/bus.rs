@@ -17,6 +17,172 @@ const A2G_CAN_ID: u32 = 0x7A2;
 /// Prefix used for simulated-bus log lines (checked by tests and demo scripts).
 pub const SIMULATED_FRAME_PREFIX: &str = "[gateway:bus:simulated] CAN FRAME";
 
+// ── CanReader (P1 / ADR-0016) ─────────────────────────────────────────────────
+
+/// SocketCAN reader with configurable receive timeout.
+///
+/// `open()` is Linux-only. On other platforms it always returns `Err` so the
+/// caller falls back gracefully; `read_frame()` is unreachable on those targets.
+pub struct CanReader {
+    #[cfg(target_os = "linux")]
+    fd: i32,
+}
+
+impl CanReader {
+    /// Open a raw CAN socket on `iface` with `SO_RCVTIMEO` set to `timeout_ms`.
+    #[allow(unused_variables)]
+    pub fn open(iface: &str, timeout_ms: u64) -> std::io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        return can_reader_open(iface, timeout_ms);
+        #[cfg(not(target_os = "linux"))]
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "SocketCAN not available on this OS",
+        ))
+    }
+
+    /// Read one CAN frame.
+    ///
+    /// Returns `Ok(Some((can_id, data)))` on success, `Ok(None)` on timeout,
+    /// `Err` on unrecoverable socket error.
+    pub fn read_frame(&self) -> std::io::Result<Option<(u32, [u8; 8])>> {
+        #[cfg(target_os = "linux")]
+        return can_reader_read(self.fd);
+        #[cfg(not(target_os = "linux"))]
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for CanReader {
+    fn drop(&mut self) {
+        unsafe { libc::close(self.fd) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn can_reader_open(iface: &str, timeout_ms: u64) -> std::io::Result<CanReader> {
+    use std::io;
+    use std::mem;
+
+    const AF_CAN: libc::c_int = 29;
+    const SOCK_RAW: libc::c_int = 3;
+    const CAN_RAW: libc::c_int = 1;
+    const SIOCGIFINDEX: libc::c_ulong = 0x8933;
+    const SOL_SOCKET: libc::c_int = 1;
+    const SO_RCVTIMEO: libc::c_int = 20;
+
+    #[repr(C)]
+    struct IfReq {
+        name: [u8; 16],
+        union_bytes: [u8; 24],
+    }
+
+    #[repr(C)]
+    struct SockAddrCan {
+        can_family: u16,
+        can_ifindex: i32,
+        _pad: [u8; 8],
+    }
+
+    unsafe {
+        let fd = libc::socket(AF_CAN, SOCK_RAW, CAN_RAW);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut ifr = IfReq {
+            name: [0u8; 16],
+            union_bytes: [0u8; 24],
+        };
+        let name_bytes = iface.as_bytes();
+        let len = name_bytes.len().min(15);
+        ifr.name[..len].copy_from_slice(&name_bytes[..len]);
+
+        if libc::ioctl(fd, SIOCGIFINDEX, &mut ifr as *mut _) < 0 {
+            libc::close(fd);
+            return Err(io::Error::last_os_error());
+        }
+        let ifindex = i32::from_ne_bytes(ifr.union_bytes[0..4].try_into().unwrap());
+
+        let addr = SockAddrCan {
+            can_family: AF_CAN as u16,
+            can_ifindex: ifindex,
+            _pad: [0u8; 8],
+        };
+        if libc::bind(
+            fd,
+            &addr as *const _ as *const libc::sockaddr,
+            mem::size_of::<SockAddrCan>() as libc::socklen_t,
+        ) < 0
+        {
+            libc::close(fd);
+            return Err(io::Error::last_os_error());
+        }
+
+        // Set receive timeout.
+        let secs = timeout_ms / 1_000;
+        let usecs = (timeout_ms % 1_000) * 1_000;
+        let tv = libc::timeval {
+            tv_sec: secs as libc::time_t,
+            tv_usec: usecs as libc::suseconds_t,
+        };
+        libc::setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            mem::size_of::<libc::timeval>() as libc::socklen_t,
+        );
+
+        Ok(CanReader { fd })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn can_reader_read(fd: i32) -> std::io::Result<Option<(u32, [u8; 8])>> {
+    use std::io;
+    use std::mem;
+
+    // can_frame: 4-byte ID + 1-byte DLC + 3-byte padding + 8-byte data.
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct CanFrame {
+        can_id: u32,
+        can_dlc: u8,
+        _pad: [u8; 3],
+        data: [u8; 8],
+    }
+
+    unsafe {
+        let mut frame = CanFrame {
+            can_id: 0,
+            can_dlc: 0,
+            _pad: [0u8; 3],
+            data: [0u8; 8],
+        };
+        let n = libc::read(
+            fd,
+            &mut frame as *mut _ as *mut libc::c_void,
+            mem::size_of::<CanFrame>(),
+        );
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock
+                || err.kind() == io::ErrorKind::TimedOut
+                || err.raw_os_error() == Some(libc::EAGAIN)
+            {
+                return Ok(None); // timeout — no frame available
+            }
+            return Err(err);
+        }
+        if n != mem::size_of::<CanFrame>() as isize {
+            return Ok(None);
+        }
+        Ok(Some((frame.can_id & 0x1FFF_FFFF, frame.data)))
+    }
+}
+
 /// Returns `true` if the named CAN interface exists on this host.
 ///
 /// Used by tests to decide whether to expect a real-bus write or the simulated

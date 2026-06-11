@@ -15,21 +15,24 @@
 //! state_trust but cannot be independently verified.
 
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::transport;
 
 use a2g_core::hitl::{ApprovalGrant, PendingApprovalBinding, SignedBinding};
-use a2g_core::vehicle::{AttestedVehicleState, ATTESTATION_FRESHNESS_MS};
+use a2g_core::vehicle::{classify_vehicle_tool, AttestedVehicleState, VehicleDomain, ATTESTATION_FRESHNESS_MS};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+use crate::state_ingest::StateIngest;
 
 use crate::bus;
 use crate::forbidden;
 use crate::keys::{DemoKeys, GatewayKeys};
-use crate::pending::PendingQueue;
+use crate::pending::{PendingQueue};
 use crate::protocol::{GatewayReceipt, GatewayRequest, GatewayResponse};
 
 /// Receipt freshness window.
@@ -50,15 +53,29 @@ pub struct GatewayState {
     pub demo_keys: DemoKeys,
     pub vcan_iface: String,
     pub pending: Mutex<PendingQueue>,
+    /// Gateway-ingested vehicle state (ADR-0016). Always present; only populated
+    /// with live CAN data when `--state-ingest` is passed at startup.
+    pub state_ingest: Arc<StateIngest>,
 }
 
 impl GatewayState {
     pub fn new(keys: GatewayKeys, demo_keys: DemoKeys, vcan_iface: &str) -> Self {
+        Self::new_with_queue(keys, demo_keys, vcan_iface, PendingQueue::new())
+    }
+
+    /// Construct with an explicit (possibly persisted) pending queue.
+    pub fn new_with_queue(
+        keys: GatewayKeys,
+        demo_keys: DemoKeys,
+        vcan_iface: &str,
+        queue: PendingQueue,
+    ) -> Self {
         GatewayState {
             keys,
             demo_keys,
             vcan_iface: vcan_iface.to_string(),
-            pending: Mutex::new(PendingQueue::new()),
+            pending: Mutex::new(queue),
+            state_ingest: Arc::new(StateIngest::new()),
         }
     }
 }
@@ -118,27 +135,22 @@ fn handle_connection(stream: std::os::unix::net::UnixStream, state: &Arc<Gateway
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap_or(());
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap_or(());
 
-    let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
-    let mut request_line = String::new();
+    let mut r = stream.try_clone().expect("clone stream for read");
+    let mut w = stream;
 
-    if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
-        return;
-    }
-
-    let response = match serde_json::from_str::<GatewayRequest>(request_line.trim()) {
+    let response = match transport::read_frame::<_, GatewayRequest>(&mut r) {
         Ok(req) => handle_request(req, state),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return, // clean disconnect
         Err(e) => GatewayResponse::Error {
-            message: format!("malformed request: {e}"),
+            message: format!("framing error: {e}"),
         },
     };
 
-    let mut out = stream;
-    let _ = writeln!(
-        out,
-        "{}",
-        serde_json::to_string(&response).unwrap_or_default()
-    );
+    let _ = transport::write_frame(&mut w, &response);
 }
 
 fn handle_request(req: GatewayRequest, state: &Arc<GatewayState>) -> GatewayResponse {
@@ -309,12 +321,27 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
     }
 
     // ── Step 5: Nonce not seen (anti-replay) ───────────────────────────────────
+    // The nonce ring catches within-session replays.  When persistence is active
+    // the high-water mark (= max issued_at_ms ever processed) is written to disk;
+    // on startup the queue checks hwm_gate() before the nonce ring so that a
+    // receipt from a previous session is rejected even if the nonce ring was
+    // cleared.
     {
         let mut q = state.pending.lock().unwrap();
+        // Post-restart HWM gate (only fires when queue was loaded from disk).
+        if let Some(hwm) = q.hwm_gate_ms() {
+            if receipt.issued_at_ms < hwm {
+                return refuse(&format!(
+                    "receipt timestamp ({}) is below the persisted nonce high-water \
+                     mark ({}); post-restart replay attempt rejected",
+                    receipt.issued_at_ms, hwm
+                ));
+            }
+        }
         if q.nonce_seen(&receipt.nonce_hex) {
             return refuse("receipt nonce has been seen before (replay attempt)");
         }
-        q.record_nonce(receipt.nonce_hex.clone());
+        q.record_nonce_with_ts(receipt.nonce_hex.clone(), receipt.issued_at_ms);
     }
 
     // ── Step 6: Action match ───────────────────────────────────────────────────
@@ -378,6 +405,32 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
         } else {
             return refuse(
                 "receipt claims state_trust='attested' but no attested_state_json was provided",
+            );
+        }
+    }
+
+    // ── Gateway CAN state re-gate for Sensitive domain (ADR-0016) ─────────────
+    // The gateway independently re-checks vehicle state for Sensitive tools
+    // against its own ingested CAN frames, regardless of what the rich domain
+    // claimed.  If the gateway has fresh live data and shows the vehicle is NOT
+    // parked and stopped, the enforcement is refused — even for a validly-signed
+    // ALLOW receipt.  When no fresh CAN data is available (reader not started or
+    // signals stale), a warning is logged for operator_trusted receipts and
+    // enforcement proceeds (backward-compatible with pre-P1 deployments).
+    if classify_vehicle_tool(&receipt.tool) == VehicleDomain::Sensitive {
+        let (gw_state, fresh) = state.state_ingest.current_state(Instant::now());
+        if fresh {
+            if !gw_state.is_parked_and_stopped() {
+                return refuse(
+                    "state_authority_mismatch: gateway CAN state shows vehicle is not \
+                     parked and stopped; Sensitive tool refused",
+                );
+            }
+        } else if receipt.state_trust == "operator_trusted" {
+            eprintln!(
+                "[gateway] WARN: Sensitive tool '{}' proceeding with operator_trusted state \
+                 (no fresh gateway CAN data); use --state-ingest for bus-verified re-gating",
+                receipt.tool
             );
         }
     }

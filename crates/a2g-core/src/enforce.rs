@@ -578,8 +578,10 @@ fn decide_core<L: EnforceLedger>(
     // ── Step 4.5: Vehicle State Gating (ADR-0007) ──
     // Requires `Option<&VerifiedVehicleState>` — raw `VehicleState` cannot reach
     // this path. `None` → `VehicleState::fail_safe()` → Sensitive DENY (safe default).
-    // Comfort, Convenience, and Forbidden are not evaluated here.
-    if crate::vehicle::classify_vehicle_tool(tool) == crate::vehicle::VehicleDomain::Sensitive {
+    let tool_domain = crate::vehicle::classify_vehicle_tool(tool);
+
+    // Sensitive domain: require parked and stopped.
+    if tool_domain == crate::vehicle::VehicleDomain::Sensitive {
         let state = verified_state
             .map(|vs| vs.as_vehicle_state().clone())
             .unwrap_or_else(crate::vehicle::VehicleState::fail_safe);
@@ -588,6 +590,20 @@ fn decide_core<L: EnforceLedger>(
         {
             return Ok(make_verdict(Decision::Deny, reason));
         }
+    }
+
+    // Comfort domain: context-aware seat-position gate (P7 / ADR-0017).
+    // Seat adjustments are blocked above 30 km/h even though Comfort tools
+    // are otherwise ALLOW — a moving seat is a driver-distraction hazard.
+    if tool_domain == crate::vehicle::VehicleDomain::Comfort {
+        if let Some(vs) = verified_state {
+            if let crate::vehicle::StateVerdict::Deny(reason) =
+                crate::vehicle::evaluate_comfort_state(tool, vs.as_vehicle_state())
+            {
+                return Ok(make_verdict(Decision::Deny, reason));
+            }
+        }
+        // No vehicle state supplied → ALLOW (Comfort is safe by omission).
     }
 
     // ── Step 5: Jurisdiction Check (uses injected `now`) ──
@@ -742,6 +758,11 @@ fn decide_core<L: EnforceLedger>(
 /// treated as operator-trusted. `enforce()` wraps it in
 /// `VerifiedVehicleState::from_operator_trusted()` and passes it to `decide()`.
 /// This is the documented interim path; the gateway will replace it with attested state.
+///
+/// Gated behind the `operator-state` feature (ADR-0016): this wrapper is the
+/// operator-asserted-state path by construction. Production builds disable the
+/// feature and call `decide()` with gateway-verified attested state instead.
+#[cfg(feature = "operator-state")]
 pub fn enforce<L: EnforceLedger>(
     mandate_cbor: &[u8],
     tool: &str,

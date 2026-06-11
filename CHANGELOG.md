@@ -4,7 +4,74 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] — 2026-06-11
+
+### Protocol Freeze
+
+v0.2.0 freezes the following protocol elements. Breaking changes to these
+surfaces will require a v0.3.0 (semver minor + changelog entry):
+
+- **CBOR transport frame**: `[u32 BE length][ciborium CBOR body]`.
+  `GatewayRequest` and `GatewayResponse` serialized via `serde` + `ciborium`.
+- **Receipt canonical payload** (CBOR array `["RECEIPT", …]`): field order,
+  types, and tag are normative.  Any change to the signing surface is a
+  breaking protocol change.
+- **BindingPayload** CBOR array `["BINDING", binding_id, request_hash, escalate_to, ttl_unix_secs]`:
+  normative for gateway signing and rich-domain verification.
+- **E2E frame layout** (ADR-0016): Speed CAN ID `0x3A0`, Gear CAN ID `0x3A1`,
+  `SPEED_DATA_ID=0xA0`, `GEAR_DATA_ID=0xA1`, alive counter modulus 15,
+  CRC-8/SAE-J1850 trailer.
+- **FFI ABI** (`a2g.h`): `a2g_decide`, `a2g_decide_with_approval`,
+  `a2g_trust_anchor_*` signature freeze.
+
 ## [Unreleased]
+
+### Added
+
+- **CBOR transport framing (P4)** — the Unix socket protocol is now
+  length-prefixed CBOR (`[u32 BE len][ciborium body]`), replacing
+  newline-delimited JSON.  All `GatewayRequest` / `GatewayResponse` variants
+  are serialized with `serde` + `ciborium`. The `transport` module provides
+  `write_frame` / `read_frame` helpers and a `MAX_FRAME_BYTES = 8 MiB` guard.
+  The JSON `Serialize`/`Deserialize` impls are retained for diagnostics and key
+  files but are no longer used on the transport path.
+
+- **Pending queue and nonce persistence (P3)** — `PendingQueue::with_persist(path)`
+  atomically persists the approval queue and nonce high-water mark to disk.
+  `a2g-gateway --queue-persist <path>` enables persistence. The HWM is loaded
+  on startup and used as a post-restart replay gate (receipts from the previous
+  session are rejected until the HWM advances). `GatewayState::new_with_queue()`
+  exposed for injection in tests and `main`.
+
+- **Adversarial test suite (P2; CI job `adversarial`)** — 10 attacks, each
+  mapped to the gateway verification step it targets:
+  1. Forbidden bypass, 2. Wrong signing key, 3. Tampered tool post-signing,
+  4. Decision field mutation, 5. Nonce replay, 6. Past timestamp,
+  7. Future timestamp, 8. Request hash mutation, 9. Phantom binding ID,
+  10. CAN state mismatch (ADR-0016 re-gate). CI step: `cargo test -p
+  a2g-gateway --test adversarial`.
+
+- **Gateway-side vehicle state ingestion (ADR-0016; P1)**
+  — The Enforcing Gateway now subscribes directly to SocketCAN and
+  independently re-gates Sensitive-domain enforcement against live bus data.
+  - New module `a2g-gateway::state_ingest`: AUTOSAR-E2E Profile 2-style frame
+    protection (CRC-8/SAE-J1850 over 7 payload bytes + data ID; alive counter
+    anti-replay). Speed frame on CAN ID `0x3A0`, gear frame on `0x3A1`.
+  - New `bus::CanReader`: Linux-only SocketCAN reader with configurable
+    `SO_RCVTIMEO`; returns `Ok(None)` on timeout for non-blocking poll.
+  - `GatewayState` gains `state_ingest: Arc<StateIngest>`.
+  - `handle_enforce()` re-gates Sensitive tools: fresh gateway state overrides
+    the rich domain's claim; mismatch → `REFUSE state_authority_mismatch`.
+    No fresh data → warn on `operator_trusted` receipts; pass on `attested`
+    (already independently verified by ECU signature).
+  - `a2g-gateway --state-ingest` flag activates the background SocketCAN reader.
+  - New binary `a2g-state-sim`: broadcasts valid E2E frames at 50 Hz
+    (`--vcan`, `--speed-kph`, `--gear`). Used for integration testing and demo.
+  - `a2g-core` gains `operator-state` Cargo feature (default on); gates
+    `from_operator_trusted()` so production builds can make unattested state a
+    compile error.
+  - Fail-safe: both signals must be refreshed within `ATTESTATION_FRESHNESS_MS`
+    (500 ms) or the ingested state degrades to `speed_mmps=277_500`, gear `Drive`.
 
 ### Breaking
 

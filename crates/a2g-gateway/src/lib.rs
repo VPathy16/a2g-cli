@@ -9,6 +9,8 @@ pub mod keys;
 pub mod pending;
 pub mod protocol;
 pub mod server;
+pub mod state_ingest;
+pub mod transport;
 
 pub use keys::{DemoKeys, GatewayKeys};
 pub use protocol::{GatewayReceipt, GatewayRequest, GatewayResponse};
@@ -29,16 +31,18 @@ pub const DEFAULT_DEMO_KEY_PATH: &str = "/tmp/a2g-gateway-demo-keys.json";
 /// a properly-signed receipt that the gateway will accept.
 pub mod client {
     use super::protocol::{GatewayReceipt, GatewayRequest, GatewayResponse};
+    use super::transport;
     use a2g_core::enforce::Verdict;
     use chrono::Utc;
     use ed25519_dalek::{Signer, SigningKey};
     use rand::RngCore;
-    use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::path::Path;
     use std::time::Duration;
 
     /// Send a single `GatewayRequest` over the socket and return the response.
+    ///
+    /// Uses length-prefixed CBOR framing (P4 / ADR-0010 §Transport).
     pub fn send_request(socket_path: &Path, req: &GatewayRequest) -> GatewayResponse {
         let stream = UnixStream::connect(socket_path).expect("connect to gateway");
         stream
@@ -49,11 +53,10 @@ pub mod client {
             .unwrap();
 
         let mut w = stream.try_clone().unwrap();
-        writeln!(w, "{}", serde_json::to_string(req).unwrap()).unwrap();
+        transport::write_frame(&mut w, req).expect("send request frame");
 
-        let mut line = String::new();
-        BufReader::new(stream).read_line(&mut line).unwrap();
-        serde_json::from_str(line.trim()).expect("gateway response JSON")
+        let mut r = stream;
+        transport::read_frame(&mut r).expect("read response frame")
     }
 
     /// Construct and sign a `GatewayReceipt` from a core `Verdict`.
