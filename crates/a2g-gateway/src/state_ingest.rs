@@ -2,14 +2,15 @@
 //!
 //! The Enforcing Gateway is the authoritative source of vehicle state: it
 //! subscribes to speed and gear frames directly from SocketCAN and verifies
-//! AUTOSAR-E2E-style integrity protection (CRC-8 + alive counter) on every
-//! frame. Caller-supplied state (`operator_trusted`) is demoted to
-//! non-authoritative — Sensitive-domain enforcement is re-gated against the
-//! gateway's own ingested state before any bus write.
+//! SAE-J1850-CRC + alive-counter integrity protection (E2E-inspired, not a
+//! full AUTOSAR-E2E profile implementation) on every frame. Caller-supplied
+//! state (`operator_trusted`) is demoted to non-authoritative — Sensitive-domain
+//! enforcement is re-gated against the gateway's own ingested state before any
+//! bus write.
 //!
 //! ## Frame layout (demo profile, documented in ADR-0016)
 //!
-//! Both frames are 8 bytes, protected by an E2E Profile-2-style trailer:
+//! Both frames are 8 bytes with a CRC-8/SAE-J1850 trailer and alive counter:
 //!
 //! **Speed frame** (default CAN ID `0x3A0`):
 //!
@@ -18,7 +19,7 @@
 //! | 0–3   | `speed_mmps` as `u32` little-endian (fixed-point, SPEC §6.8) |
 //! | 4–5   | reserved, `0x00` |
 //! | 6     | alive counter in the low nibble (`0..=14`, wraps; `15` invalid) |
-//! | 7     | CRC-8 (SAE J1850) over bytes 0–6 ++ `SPEED_DATA_ID` |
+//! | 7     | CRC-8/SAE-J1850 over bytes 0–6 ∥ `SPEED_DATA_ID` |
 //!
 //! **Gear frame** (default CAN ID `0x3A1`):
 //!
@@ -27,7 +28,7 @@
 //! | 0     | gear: 0=Park, 1=Reverse, 2=Neutral, 3=Drive |
 //! | 1–5   | reserved, `0x00` |
 //! | 6     | alive counter in the low nibble (`0..=14`, wraps; `15` invalid) |
-//! | 7     | CRC-8 (SAE J1850) over bytes 0–6 ++ `GEAR_DATA_ID` |
+//! | 7     | CRC-8/SAE-J1850 over bytes 0–6 ∥ `GEAR_DATA_ID` |
 //!
 //! The data ID in the CRC input provides masquerade protection: a gear frame
 //! replayed on the speed CAN ID fails the CRC.
@@ -49,6 +50,13 @@
 //! the fail-safe (`speed_mmps = 277_500`, gear `Drive`) — moving without data
 //! is the safe assumption (SPEC §6.6). All staleness checks take an injected
 //! `Instant` so they are unit-testable without a clock.
+//!
+//! ## Note on CRC polynomial
+//!
+//! CRC-8/SAE-J1850 (poly 0x1D, init 0xFF, xorout 0xFF, no reflection) is the
+//! polynomial used by AUTOSAR E2E **Profile 1**. Profile 2 uses CRC-8H2F
+//! (poly 0x2F). This implementation intentionally uses Profile 1's polynomial
+//! and does not claim compliance with any full AUTOSAR-E2E profile.
 
 use a2g_core::vehicle::{Gear, VehicleState, ATTESTATION_FRESHNESS_MS};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,12 +73,14 @@ pub const SPEED_DATA_ID: u8 = 0xA0;
 /// E2E data ID mixed into the gear-frame CRC (masquerade protection).
 pub const GEAR_DATA_ID: u8 = 0xA1;
 
-/// Alive counter modulus: values `0..=14` cycle; `15` is invalid (E2E Profile 2).
+/// Alive counter modulus: values `0..=14` cycle; `15` is invalid (sentinel value
+/// per AUTOSAR-E2E Profile 1 convention; see module note on polynomial choice).
 pub const COUNTER_MODULUS: u8 = 15;
 
-// ── CRC-8 (SAE J1850: poly 0x1D, init 0xFF, xorout 0xFF, no reflection) ──────
+// ── CRC-8/SAE-J1850 (poly 0x1D, init 0xFF, xorout 0xFF, no reflection) ────────
 
-/// CRC-8/SAE-J1850 — the polynomial used by AUTOSAR E2E Profile 2.
+/// CRC-8/SAE-J1850 — the polynomial from AUTOSAR E2E Profile 1 (not Profile 2).
+/// See module-level note for rationale.
 pub fn crc8_j1850(data: &[u8]) -> u8 {
     let mut crc: u8 = 0xFF;
     for &byte in data {

@@ -22,17 +22,22 @@ and losing situational awareness.
 
 ## Decision
 
-The `decide()` function applies a **context-aware comfort gate** for
+The `decide()` function applies an **actor-zone-keyed comfort gate** for
 seat-position adjustment tools when vehicle state is available:
 
-| Condition | Gate | Result |
-|-----------|------|--------|
-| Tool is a seat-position tool AND `speed_mmps ≥ COMFORT_SEAT_SPEED_GATE_MMPS` (≥ 30 km/h) | Speed gate | `DENY comfort_context_violation` |
-| Tool is a seat-position tool AND `speed_mmps < COMFORT_SEAT_SPEED_GATE_MMPS` (< 30 km/h) | — | `ALLOW` |
-| Tool is any other Comfort tool | — | `ALLOW` |
-| No vehicle state supplied | — | `ALLOW` (Comfort safe by omission) |
+| Actor | Condition | Gate | Result |
+|-------|-----------|------|--------|
+| `Driver` | Seat tool AND `speed_mmps ≥ SPEED_GATE_MMPS` (≥ 5 km/h) | Motion gate | `DENY comfort_context_violation` |
+| `Driver` | Seat tool AND `speed_mmps < SPEED_GATE_MMPS` (< 5 km/h) | — | `ALLOW` |
+| `Passenger` | Seat tool (any speed) | — | `ALLOW` |
+| Any | Non-seat Comfort tool | — | `ALLOW` |
+| Any | No vehicle state supplied | — | `ALLOW` (Comfort safe by omission) |
 
-### Seat-position tools subject to the gate
+The driver-zone gate fires at essentially any motion (≥ 5 km/h).  Passenger-zone
+seat adjustments are unconditionally permissive — a passenger legitimately adjusts
+their seat at highway speed.
+
+### Seat-position tools subject to the driver-zone gate
 
 - `SEAT_FORE_AFT_MOVE` — fore/aft movement
 - `SEAT_HEIGHT_MOVE` — height adjustment
@@ -62,9 +67,17 @@ if tool_domain == VehicleDomain::Comfort {
 
 ### Speed threshold
 
-`COMFORT_SEAT_SPEED_GATE_MMPS = 8_333 mm/s` (exactly 30 km/h × 1 000 000 ÷ 3 600,
-rounded to nearest integer).  The threshold is a named constant so OEM deployments
-can adjust it without modifying the evaluation logic.
+`SPEED_GATE_MMPS = 1_389 mm/s` (5 km/h, shared with the Sensitive domain gate).
+Driver-zone seat adjustments are blocked at essentially any vehicle motion.
+
+### Known limitation
+
+This gate is evaluated inside `decide()` on the rich-domain path.  Unlike the
+Sensitive re-gate (ADR-0016), the gateway does **not** independently re-enforce
+the Comfort seat gate against its own ingested CAN state.  A compromised rich
+domain could in principle ALLOW a driver-seat adjustment while in motion.
+Acceptable for the demo tier; a future ADR may extend gateway re-gating to the
+Comfort seat path.
 
 ## Consequences
 
@@ -77,17 +90,20 @@ can adjust it without modifying the evaluation logic.
   parking lots and slow traffic.
 
 **Negative / trade-offs:**
-- A passenger requesting their own seat adjustment while the vehicle is moving
-  at 35 km/h is also blocked.  This is a deliberate conservative choice; OEMs
-  may set a higher threshold or add an `Actor::Passenger` bypass in future.
+- Passenger seat adjustments are always ALLOW regardless of speed; this is correct
+  by design but means a passenger agent cannot be restricted.  OEMs who need
+  passenger-zone gating must extend `evaluate_comfort_state` with an explicit
+  passenger policy.
 - Requires vehicle state to be supplied to exercise the gate; if state is absent
   the gate does not fire (Comfort safe by omission).  For Comfort this is
   acceptable — unlike Sensitive tools where the absence of state must be
   fail-dangerous.
+- The gate lives in the rich domain (`decide()`) and is not independently
+  re-enforced at the gateway (see Known Limitation above).
 
 ## References
 
 - `crates/a2g-core/src/vehicle.rs` — `evaluate_comfort_state()`,
-  `COMFORT_SEAT_SPEED_GATE_MMPS`, `is_comfort_seat_tool()`
+  `SPEED_GATE_MMPS`, `is_comfort_seat_tool()`
 - `crates/a2g-core/src/enforce.rs` — integration in `decide()`
 - ADR-0005 (capability model), ADR-0016 (gateway state feeds `verified_state`)

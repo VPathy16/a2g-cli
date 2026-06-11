@@ -29,9 +29,14 @@
 use serde::{de::DeserializeOwned, Serialize};
 use std::io::{self, Read, Write};
 
-/// Maximum accepted CBOR frame size (8 MiB). Frames larger than this are
-/// rejected before allocation to prevent memory exhaustion on malformed input.
-pub const MAX_FRAME_BYTES: u32 = 8 * 1024 * 1024;
+/// Maximum accepted CBOR frame size (64 KiB).
+///
+/// The largest legitimate gateway message (a `GatewayReceipt` with an
+/// `attested_state_json` blob) is a few kilobytes.  64 KiB gives 10× headroom
+/// while bounding the per-connection allocation to a constant — preventing the
+/// memory-amplification DoS that a generous limit (e.g. 8 MiB × N connections)
+/// would enable.
+pub const MAX_FRAME_BYTES: u32 = 64 * 1024;
 
 /// Encode `value` to CBOR and write it as a length-prefixed frame to `w`.
 pub fn write_frame<W, T>(w: &mut W, value: &T) -> io::Result<()>

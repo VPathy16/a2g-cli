@@ -275,12 +275,20 @@ impl PendingQueue {
                 return;
             }
         };
-        // Write atomically: temp file then rename.
+        // Write atomically: write + fdatasync on the temp file, then rename.
+        // fsync before rename so the data survives a power cut between the two
+        // syscalls — otherwise the high-water mark is silently lost on restart.
         let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, &json).is_ok() {
-            if let Err(e) = std::fs::rename(&tmp, path) {
-                eprintln!("[gateway:persist] rename failed: {e}");
-            }
+        let save_result = (|| -> std::io::Result<()> {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(json.as_bytes())?;
+            f.sync_data()?;
+            drop(f);
+            std::fs::rename(&tmp, path)
+        })();
+        if let Err(e) = save_result {
+            eprintln!("[gateway:persist] save failed: {e}");
         }
     }
 }

@@ -54,9 +54,10 @@ surfaces will require a v0.3.0 (semver minor + changelog entry):
 - **Gateway-side vehicle state ingestion (ADR-0016; P1)**
   — The Enforcing Gateway now subscribes directly to SocketCAN and
   independently re-gates Sensitive-domain enforcement against live bus data.
-  - New module `a2g-gateway::state_ingest`: AUTOSAR-E2E Profile 2-style frame
-    protection (CRC-8/SAE-J1850 over 7 payload bytes + data ID; alive counter
-    anti-replay). Speed frame on CAN ID `0x3A0`, gear frame on `0x3A1`.
+  - New module `a2g-gateway::state_ingest`: E2E-inspired frame protection
+    (CRC-8/SAE-J1850, Profile 1 polynomial 0x1D, over 7 payload bytes + data
+    ID; alive counter anti-replay). Speed frame on CAN ID `0x3A0`, gear on
+    `0x3A1`. Not a full AUTOSAR-E2E profile implementation.
   - New `bus::CanReader`: Linux-only SocketCAN reader with configurable
     `SO_RCVTIMEO`; returns `Ok(None)` on timeout for non-blocking poll.
   - `GatewayState` gains `state_ingest: Arc<StateIngest>`.

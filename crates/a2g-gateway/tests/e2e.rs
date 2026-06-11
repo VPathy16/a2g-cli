@@ -698,8 +698,12 @@ fn test_malformed_tool_no_panic() {
     // unverified tool string.  Verify classify_vehicle_tool() does not panic or
     // over-allocate on adversarial inputs — it is allocation-free, panic-free,
     // and O(bounded) over all inputs.
+    //
+    // Tool names longer than ~62 KiB would exceed MAX_FRAME_BYTES (64 KiB) once
+    // CBOR-encoded with the rest of the receipt; use 32 KiB to stay within the
+    // frame limit while still exercising large-input behaviour.
     let gw = GatewayHandle::start();
-    let oversized = "x".repeat(65_536);
+    let oversized = "x".repeat(32_768);
 
     let cases: &[&str] = &[
         &oversized,

@@ -586,37 +586,47 @@ pub fn evaluate_vehicle_state(_tool: &str, state: &VehicleState) -> StateVerdict
 
 // ── Context-aware Comfort policies (P7) ─────────────────────────────────────
 
-/// Speed threshold above which seat-position adjustments are blocked.
-///
-/// 30 km/h × (1 000 000 mm/km) ÷ (3 600 s/h) = 8 333.3… mm/s, rounded.
-/// Moving a seat (fore/aft, height, lumbar, headrest) at highway speed is a
-/// distraction and safety hazard for the driver.
-pub const COMFORT_SEAT_SPEED_GATE_MMPS: u32 = 8_333;
-
 /// Evaluate vehicle-state context for a **Comfort-domain** tool.
 ///
-/// Returns `Allow` unless the tool is in the seat-adjustment sub-group and
-/// speed exceeds `COMFORT_SEAT_SPEED_GATE_MMPS`.
+/// Returns `Allow` unless the tool is a seat-position adjustment requested by the
+/// **Driver** zone at any appreciable speed.  Passenger-zone seat adjustments are
+/// never gated — a passenger legitimately adjusts their seat at highway speed.
+/// All other Comfort tools (HVAC, lighting, media) always ALLOW.
 ///
 /// Rules:
-/// - Seat-position tools: DENY at speed ≥ 30 km/h (8 333 mm/s).
-/// - All other Comfort tools (HVAC, lighting, media): always ALLOW.
+/// - `Actor::Driver` + seat tool + `speed_mmps >= SPEED_GATE_MMPS` (≥ 5 km/h): DENY.
+/// - `Actor::Passenger` + seat tool: ALLOW unconditionally.
+/// - All other Comfort tools: ALLOW.
+/// - No vehicle state supplied: ALLOW (Comfort is safe by omission).
+///
+/// ## Known limitation
+///
+/// This gate is evaluated inside `decide()` on the rich-domain path.  Unlike the
+/// Sensitive re-gate (ADR-0016), the gateway does **not** independently re-enforce
+/// the Comfort seat gate against its own ingested CAN state.  A compromised rich
+/// domain could in principle ALLOW a driver-seat adjustment while in motion.
+/// Acceptable for the current demo tier; a future ADR may extend gateway re-gating
+/// to the Comfort seat path.
 ///
 /// ## no_std
 ///
 /// Pure, deterministic, allocation-free. `Deny` carries a `&'static str` reason.
 pub fn evaluate_comfort_state(tool: &str, state: &VehicleState) -> StateVerdict {
-    if is_comfort_seat_tool(tool) && state.speed_mmps >= COMFORT_SEAT_SPEED_GATE_MMPS {
+    if is_comfort_seat_tool(tool)
+        && state.actor == Actor::Driver
+        && state.speed_mmps >= SPEED_GATE_MMPS
+    {
         return StateVerdict::Deny(
-            "comfort_context_violation: seat-position adjustment blocked above 30 km/h \
-             (speed_mmps >= 8333); ensure vehicle is below 30 km/h before adjusting seats",
+            "comfort_context_violation: driver-zone seat-position adjustment blocked while \
+             in motion (speed_mmps >= 1389, >= 5.0 km/h); passenger-zone adjustments \
+             are not restricted",
         );
     }
     StateVerdict::Allow
 }
 
-/// Returns `true` if the tool name is a seat-position adjustment tool that is
-/// subject to the 30 km/h context gate.
+/// Returns `true` if the tool name is a seat-position adjustment tool subject to
+/// the driver-zone motion gate.
 fn is_comfort_seat_tool(tool: &str) -> bool {
     matches!(
         tool,
@@ -1244,36 +1254,39 @@ mod tests {
     // ── Context-aware Comfort policies (P7) ──────────────────────────────────
 
     #[test]
-    fn test_comfort_seat_below_30kph_allowed() {
+    fn test_comfort_driver_seat_below_speed_gate_allowed() {
+        // Driver at 3.6 km/h (1000 mm/s) — below the 5 km/h motion gate.
         let state = VehicleState {
-            speed_mmps: 5_555, // 20 km/h — below 30 km/h gate
+            speed_mmps: 1_000,
             gear: Gear::Drive,
             actor: Actor::Driver,
         };
         assert_eq!(
             evaluate_comfort_state("SEAT_FORE_AFT_MOVE", &state),
             StateVerdict::Allow,
-            "seat adjustment below 30 km/h must be ALLOW"
+            "driver seat adjustment below 5 km/h must be ALLOW"
         );
     }
 
     #[test]
-    fn test_comfort_seat_at_30kph_denied() {
+    fn test_comfort_driver_seat_at_speed_gate_denied() {
+        // Driver exactly at SPEED_GATE_MMPS (5 km/h) — should be DENY.
         let state = VehicleState {
-            speed_mmps: COMFORT_SEAT_SPEED_GATE_MMPS, // exactly 30 km/h
+            speed_mmps: SPEED_GATE_MMPS,
             gear: Gear::Drive,
             actor: Actor::Driver,
         };
         assert!(
             matches!(evaluate_comfort_state("SEAT_FORE_AFT_MOVE", &state), StateVerdict::Deny(_)),
-            "seat adjustment at 30 km/h must be DENY"
+            "driver seat adjustment at SPEED_GATE_MMPS must be DENY"
         );
     }
 
     #[test]
-    fn test_comfort_seat_above_30kph_denied() {
+    fn test_comfort_driver_seat_in_motion_denied() {
+        // Driver at 80 km/h — all seat-position tools must be DENY.
         let state = VehicleState {
-            speed_mmps: 22_222, // 80 km/h
+            speed_mmps: 22_222,
             gear: Gear::Drive,
             actor: Actor::Driver,
         };
@@ -1286,7 +1299,31 @@ mod tests {
         ] {
             assert!(
                 matches!(evaluate_comfort_state(tool, &state), StateVerdict::Deny(_)),
-                "seat tool {} above 30 km/h must be DENY",
+                "driver seat tool {} at speed must be DENY",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_comfort_passenger_seat_at_speed_allowed() {
+        // Passenger adjusting their seat at 80 km/h must always be ALLOW.
+        let state = VehicleState {
+            speed_mmps: 22_222,
+            gear: Gear::Drive,
+            actor: Actor::Passenger,
+        };
+        for tool in &[
+            "SEAT_FORE_AFT_MOVE",
+            "SEAT_HEIGHT_MOVE",
+            "SEAT_LUMBAR_FORE_AFT_MOVE",
+            "SEAT_HEADREST_ANGLE_MOVE",
+            "vehicle.seat.fore_aft",
+        ] {
+            assert_eq!(
+                evaluate_comfort_state(tool, &state),
+                StateVerdict::Allow,
+                "passenger seat tool {} must be ALLOW at any speed",
                 tool
             );
         }
@@ -1294,7 +1331,7 @@ mod tests {
 
     #[test]
     fn test_comfort_hvac_not_gated_by_speed() {
-        // HVAC, lighting, and media tools must be ALLOW regardless of speed.
+        // HVAC, lighting, and media tools must be ALLOW regardless of speed or actor.
         let state = VehicleState {
             speed_mmps: 277_500, // 999 km/h (fail-safe speed)
             gear: Gear::Drive,
@@ -1317,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn test_comfort_seat_adjustment_deny_message() {
+    fn test_comfort_driver_seat_deny_message() {
         let state = VehicleState {
             speed_mmps: 20_000,
             gear: Gear::Drive,

@@ -22,7 +22,7 @@ was actually moving, and the gateway would enforce it.
 ## Decision
 
 The Enforcing Gateway subscribes directly to SocketCAN and applies AUTOSAR-E2E
-Profile 2-style integrity protection (CRC-8/SAE-J1850 + alive counter) to every
+E2E-inspired integrity protection (CRC-8/SAE-J1850 + alive counter) to every
 ingested frame. Sensitive-domain enforcement is **re-gated** against the gateway's
 own ingested state; a receipt from the rich domain cannot override the gateway's
 independent reading.
@@ -107,7 +107,8 @@ broadcasts valid E2E-protected frames at 50 Hz. Integration tests use a
 
 ## References
 
-- AUTOSAR E2E Protocol Specification (AUTOSAR_SWS_E2ELibrary) — Profile 2
+- AUTOSAR E2E Protocol Specification (AUTOSAR_SWS_E2ELibrary) — Profile 1
+  (CRC-8/SAE-J1850, poly 0x1D). **Not** Profile 2 (CRC-8H2F, poly 0x2F).
 - SAE J1850 — Class B Data Communication Network Interface
 - `crates/a2g-gateway/src/state_ingest.rs` — implementation
 - `crates/a2g-gateway/src/bus.rs` — `CanReader` (also writes enforcement frames)
