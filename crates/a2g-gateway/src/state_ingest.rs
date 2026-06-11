@@ -215,6 +215,11 @@ pub struct StateIngest {
     inner: Mutex<IngestInner>,
     /// Staleness deadline in milliseconds (default `ATTESTATION_FRESHNESS_MS`).
     freshness_ms: u64,
+    /// Set to `true` when `spawn_reader()` is called — i.e. the gateway was
+    /// started with `--state-ingest`.  Used by `handle_enforce` to distinguish
+    /// "reader never started (backward-compat)" from "reader started but frames
+    /// stale (fail-closed)".
+    reader_active: AtomicBool,
 }
 
 impl Default for StateIngest {
@@ -241,7 +246,20 @@ impl StateIngest {
                 stats: IngestStats::default(),
             }),
             freshness_ms,
+            reader_active: AtomicBool::new(false),
         }
+    }
+
+    /// Returns `true` once `--state-ingest` has been activated (i.e. `spawn_reader`
+    /// was called).  When `true` and `current_state()` returns `fresh=false`, the
+    /// gateway refuses Sensitive enforcement fail-closed instead of warn-and-proceeding.
+    pub fn reader_active(&self) -> bool {
+        self.reader_active.load(Ordering::Acquire)
+    }
+
+    /// Mark the reader as active. Called by `spawn_reader()` and in tests.
+    pub fn mark_reader_active(&self) {
+        self.reader_active.store(true, Ordering::Release);
     }
 
     /// Feed a raw speed frame. Invalid frames are counted and ignored.
@@ -332,6 +350,10 @@ pub fn spawn_reader(
     speed_can_id: u32,
     gear_can_id: u32,
 ) -> Arc<AtomicBool> {
+    // Mark active before the thread is spawned so `handle_enforce` sees the
+    // flag as soon as the first request arrives — even if the thread hasn't
+    // produced its first frame yet.
+    ingest.mark_reader_active();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_c = Arc::clone(&stop);
     std::thread::spawn(move || {

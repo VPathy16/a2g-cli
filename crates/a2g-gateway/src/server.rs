@@ -412,11 +412,17 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
     // ── Gateway CAN state re-gate for Sensitive domain (ADR-0016) ─────────────
     // The gateway independently re-checks vehicle state for Sensitive tools
     // against its own ingested CAN frames, regardless of what the rich domain
-    // claimed.  If the gateway has fresh live data and shows the vehicle is NOT
-    // parked and stopped, the enforcement is refused — even for a validly-signed
-    // ALLOW receipt.  When no fresh CAN data is available (reader not started or
-    // signals stale), a warning is logged for operator_trusted receipts and
-    // enforcement proceeds (backward-compatible with pre-P1 deployments).
+    // claimed.
+    //
+    // Three cases:
+    //  1. Fresh CAN data AND vehicle is moving → REFUSE.
+    //  2. Fresh CAN data AND vehicle is parked → pass through.
+    //  3a. No fresh CAN data AND reader was started (--state-ingest active) →
+    //      REFUSE fail-closed.  A bus timeout must not reopen GAP-1: once the
+    //      operator has opted into bus-verified re-gating, stale data is not
+    //      a legitimate fallback to operator-trusted state.
+    //  3b. No fresh CAN data AND reader was NOT started (no --state-ingest) →
+    //      warn-and-proceed for backward compatibility with pre-ADR-0016 deployments.
     if classify_vehicle_tool(&receipt.tool) == VehicleDomain::Sensitive {
         let (gw_state, fresh) = state.state_ingest.current_state(Instant::now());
         if fresh {
@@ -426,7 +432,16 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
                      parked and stopped; Sensitive tool refused",
                 );
             }
+            // fresh + parked → fall through to bus write
+        } else if state.state_ingest.reader_active() {
+            // Case 3a: reader started but frames stale → fail-closed.
+            return refuse(
+                "state_authority_mismatch: --state-ingest reader is active but CAN frames \
+                 are stale (no valid frame within the freshness window); Sensitive \
+                 enforcement refused fail-closed (SPEC §6.6)",
+            );
         } else if receipt.state_trust == "operator_trusted" {
+            // Case 3b: reader never started → backward-compat warn-and-proceed.
             eprintln!(
                 "[gateway] WARN: Sensitive tool '{}' proceeding with operator_trusted state \
                  (no fresh gateway CAN data); use --state-ingest for bus-verified re-gating",

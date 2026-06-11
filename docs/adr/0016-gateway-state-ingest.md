@@ -64,7 +64,14 @@ In `handle_enforce()`, after all existing 7 steps:
   state:
   - If `is_parked_and_stopped()` is false → `REFUSE state_authority_mismatch`
   - If `is_parked_and_stopped()` is true → pass (gateway confirms the rich domain)
-- If the gateway has **no fresh** state (reader not started or signals stale):
+- If the gateway has **no fresh** state **and the reader is active** (`--state-ingest`
+  was passed at startup):
+  - **`REFUSE state_authority_mismatch`** (fail-closed). A bus timeout does not reopen
+    GAP-1 — once the operator has opted into bus-verified re-gating, stale data is not
+    a legitimate fallback to unverified state. A CAN bus outage must surface as
+    enforcement failures, not silent degradation.
+- If the gateway has **no fresh** state **and the reader was never started** (no
+  `--state-ingest`):
   - If `state_trust == "operator_trusted"` → log a warning; enforcement proceeds
     (backward-compatible for deployments without `--state-ingest`)
   - If `state_trust == "attested"` → already independently verified above (step 8

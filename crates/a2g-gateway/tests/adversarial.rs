@@ -17,6 +17,7 @@
 //! | 8 | `request_hash_mutation`       | Step 6 — request_hash mismatch |
 //! | 9 | `phantom_binding_id`          | Step 7 — binding not in queue |
 //! | 10| `can_state_mismatch`          | ADR-0016 — gateway CAN says moving |
+//! | 11| `stale_can_reader_active_fails_closed` | ADR-0016 — reader active, frames stale |
 
 use a2g_core::enforce::{decide, Decision, TrustAnchor};
 use a2g_core::ledger::NoopLedger;
@@ -587,5 +588,57 @@ fn attack_10_can_state_mismatch() {
         matches!(&resp, GatewayResponse::Refused { reason }
             if reason.contains("state_authority_mismatch")),
         "CAN state mismatch must be refused by ADR-0016 re-gate; got: {resp:?}"
+    );
+}
+
+// ── Attack 11: Stale CAN data with active reader fails closed ─────────────────
+
+/// --state-ingest was activated but the CAN bus has gone silent (frames stale /
+/// no frame was ever received).  The gateway must REFUSE Sensitive enforcement
+/// fail-closed — a bus timeout must not silently fall back to operator-trusted
+/// state and reopen GAP-1.
+#[test]
+fn attack_11_stale_can_reader_active_fails_closed() {
+    let adv = Adv::start();
+
+    // Simulate --state-ingest having been activated at startup.  No frames are
+    // injected, so the state stays fail-safe (fresh=false), but reader_active=true
+    // means the gateway knows it was supposed to be getting live data.
+    adv.state.state_ingest.mark_reader_active();
+
+    // Build a valid Sensitive ALLOW receipt (all 7 canonical steps pass).
+    let issued_at_ms = Utc::now().timestamp_millis();
+    let mut nonce = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let nonce_hex = hex::encode(nonce);
+    let request_hash = GatewayReceipt::compute_request_hash("WINDOW_POS", "{}", issued_at_ms);
+    let partial = GatewayReceipt {
+        verdict_id: uuid::Uuid::new_v4().to_string(),
+        decision: "ALLOW".to_string(),
+        tool: "WINDOW_POS".to_string(),
+        params_json: "{}".to_string(),
+        policy_rule: "sensitive_allowed_parked".to_string(),
+        state_trust: "operator_trusted".to_string(),
+        binding_id: String::new(),
+        request_hash,
+        issued_at_ms,
+        nonce_hex,
+        signature_hex: String::new(),
+        attested_state_json: None,
+    };
+    let payload = partial.canonical_bytes().unwrap();
+    let sig: ed25519_dalek::Signature = adv.receipt_sk.sign(&payload);
+    let receipt = GatewayReceipt {
+        signature_hex: hex::encode(sig.to_bytes()),
+        ..partial
+    };
+
+    let resp = adv.send(&GatewayRequest::Enforce {
+        receipt: Box::new(receipt),
+    });
+    assert!(
+        matches!(&resp, GatewayResponse::Refused { reason }
+            if reason.contains("state_authority_mismatch")),
+        "stale CAN with active reader must fail-closed (GAP-1 must not reopen); got: {resp:?}"
     );
 }
