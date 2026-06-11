@@ -14,8 +14,7 @@
 //!
 //! ## Allocation notes — non-removable on the current path
 //!
-//! - TOML parse (`toml::from_str`): creates owned `String` for every `Mandate` field.
-//!   Blocked on a zero-copy TOML deserializer (none available for no_std).
+//! - CBOR decode (`decode_canonical`): creates owned `String` for every `Mandate` field.
 //! - `serde_json::to_string(params)`: serialises params to compute hash. One transient String.
 //! - `hex::encode(Sha256::...)`: two 64-byte `String`s per call (params_hash, mandate_hash).
 //! - `Verdict` struct: ~10 owned `String` fields; empty fields use `String::new()` (stack
@@ -29,7 +28,7 @@ use crate::hitl::{
     self, compute_request_hash, PendingApprovalBinding, PENDING_APPROVAL_TTL_MINUTES,
 };
 use crate::ledger::EnforceLedger;
-use crate::mandate::{self, Mandate};
+use crate::mandate;
 use crate::vehicle::VerifiedVehicleState;
 use chrono::{DateTime, Duration, Timelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -115,7 +114,7 @@ pub struct Verdict {
 /// When called through `enforce()`, the `path` param has already been resolved to
 /// a canonical real path before this function runs.
 pub fn decide<L: EnforceLedger>(
-    mandate_str: &str,
+    mandate_cbor: &[u8],
     tool: &str,
     params: &serde_json::Value,
     ledger: &L,
@@ -123,7 +122,7 @@ pub fn decide<L: EnforceLedger>(
     verified_state: Option<&VerifiedVehicleState>,
 ) -> Result<Verdict, A2gError> {
     decide_core(
-        mandate_str,
+        mandate_cbor,
         tool,
         params,
         ledger,
@@ -152,7 +151,7 @@ pub fn decide<L: EnforceLedger>(
 /// so the ledger chain links Phase 1 and Phase 2 receipts.
 #[allow(clippy::too_many_arguments)]
 pub fn decide_with_approval<L: EnforceLedger>(
-    mandate_str: &str,
+    mandate_cbor: &[u8],
     tool: &str,
     params: &serde_json::Value,
     ledger: &L,
@@ -167,11 +166,10 @@ pub fn decide_with_approval<L: EnforceLedger>(
             .map_err(|e| A2gError::Json(e.to_string()))?
             .as_bytes(),
     ));
-    let m: Mandate =
-        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
+    let (m, _) = mandate::parse_cbor_mandate_raw(mandate_cbor)?;
     let agent_did = m.mandate.agent_did.clone();
     let agent_name = m.mandate.agent_name.clone();
-    let mandate_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
+    let mandate_hash = hex::encode(Sha256::digest(mandate_cbor));
     let proposal_hash = m.mandate.proposal_hash.clone();
 
     let early_deny_state_trust = verified_state
@@ -231,7 +229,15 @@ pub fn decide_with_approval<L: EnforceLedger>(
     }
 
     // ── Run the normal pipeline, skipping Step 6 (escalation already resolved) ──
-    let mut verdict = decide_core(mandate_str, tool, params, ledger, now, verified_state, true)?;
+    let mut verdict = decide_core(
+        mandate_cbor,
+        tool,
+        params,
+        ledger,
+        now,
+        verified_state,
+        true,
+    )?;
 
     // Link Phase 2 receipt to Phase 1 receipt via parent_receipt_hash.
     if verdict.decision == Decision::Allow && !grant.parent_receipt_hash.is_empty() {
@@ -247,7 +253,7 @@ pub fn decide_with_approval<L: EnforceLedger>(
 /// `skip_escalation`: when `true`, Step 6 (escalation check) is bypassed.
 /// Set by `decide_with_approval()` after validating a grant.
 fn decide_core<L: EnforceLedger>(
-    mandate_str: &str,
+    mandate_cbor: &[u8],
     tool: &str,
     params: &serde_json::Value,
     ledger: &L,
@@ -261,13 +267,12 @@ fn decide_core<L: EnforceLedger>(
             .as_bytes(),
     ));
 
-    let m: Mandate =
-        toml::from_str(mandate_str).map_err(|e| A2gError::MandateParse(e.to_string()))?;
+    let (m, cbor_envelope) = mandate::parse_cbor_mandate_raw(mandate_cbor)?;
 
     let agent_did = m.mandate.agent_did.clone();
     let agent_name = m.mandate.agent_name.clone();
 
-    let mandate_hash = hex::encode(Sha256::digest(mandate_str.as_bytes()));
+    let mandate_hash = hex::encode(Sha256::digest(mandate_cbor));
     let proposal_hash = m.mandate.proposal_hash.clone();
 
     // Compute state trust basis for audit trail (ADR-0007 follow-up).
@@ -328,8 +333,8 @@ fn decide_core<L: EnforceLedger>(
         ));
     }
 
-    // ── Step 1: Mandate Signature Check (no TTL; TTL handled in step 2) ──
-    if let Err(e) = mandate::verify_signature(mandate_str) {
+    // ── Step 1: Mandate Signature Check (CBOR, ADR-0013) ──
+    if let Err(e) = mandate::verify_cbor_signature(&cbor_envelope) {
         return Ok(make_verdict(
             Decision::Deny,
             &format!("mandate_invalid: {}", e),
@@ -633,7 +638,7 @@ fn decide_core<L: EnforceLedger>(
 /// `VerifiedVehicleState::from_operator_trusted()` and passes it to `decide()`.
 /// This is the documented interim path; the gateway will replace it with attested state.
 pub fn enforce<L: EnforceLedger>(
-    mandate_str: &str,
+    mandate_cbor: &[u8],
     tool: &str,
     params: &serde_json::Value,
     ledger: &L,
@@ -653,7 +658,7 @@ pub fn enforce<L: EnforceLedger>(
     let operator_state = crate::vehicle::extract_vehicle_state(&resolved_params);
     let verified = VerifiedVehicleState::from_operator_trusted(operator_state);
     decide(
-        mandate_str,
+        mandate_cbor,
         tool,
         &resolved_params,
         ledger,
@@ -889,6 +894,7 @@ fn extract_host(url: &str) -> String {
 )]
 mod tests {
     use super::*;
+    use bs58;
     use chrono::TimeZone;
 
     struct TestLedger;
@@ -911,54 +917,123 @@ mod tests {
         }
     }
 
-    fn signed_mandate() -> String {
-        let (did, _, _) = crate::identity::generate_agent_keypair();
+    /// Build a signed CBOR mandate for tests.
+    #[allow(clippy::too_many_arguments)]
+    fn build_cbor_mandate(
+        agent_name: &str,
+        tools: &[&str],
+        escalate_tools: &[&str],
+        workspace_root: &str,
+        operating_hours: &str,
+        fs_read: &[&str],
+        fs_write: &[&str],
+        fs_deny: &[&str],
+        ttl_hours: u64,
+    ) -> Vec<u8> {
+        use crate::cbor::{encode_canonical, CborMandate, MandateTbs};
+        use crate::mandate::capabilities_hash;
+        use ed25519_dalek::Signer;
+
+        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
         let (_, secret, _) = crate::identity::generate_agent_keypair();
-        let template = crate::mandate::generate_template("test-agent", &did);
-        crate::mandate::sign_mandate(&template, &secret, 24).unwrap()
+        let secret_bytes = hex::decode(&secret).unwrap();
+        let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
+        let vk = sk.verifying_key();
+
+        let now = Utc::now();
+        let expires = now
+            .checked_add_signed(chrono::Duration::hours(ttl_hours as i64))
+            .unwrap_or(now);
+        let issuer_did = format!("did:a2g:{}", bs58::encode(vk.to_bytes()).into_string());
+        let tools_owned: Vec<String> = tools.iter().map(|s| s.to_string()).collect();
+        let escalate_owned: Vec<String> = escalate_tools.iter().map(|s| s.to_string()).collect();
+        let cap_hash_bytes = hex::decode(capabilities_hash(&tools_owned)).unwrap();
+        let escalate_to = if escalate_owned.is_empty() {
+            String::new()
+        } else {
+            "did:a2g:approver".to_string()
+        };
+
+        let tbs = MandateTbs {
+            tag: "MANDATE".to_string(),
+            agent_did,
+            issuer_did,
+            agent_name: agent_name.to_string(),
+            issued_at: now.to_rfc3339(),
+            expires_at: expires.to_rfc3339(),
+            proposal_hash: String::new(),
+            workspace_root: workspace_root.to_string(),
+            capabilities_hash: cap_hash_bytes.into(),
+            tools: tools_owned,
+            fs_read: fs_read.iter().map(|s| s.to_string()).collect(),
+            fs_write: fs_write.iter().map(|s| s.to_string()).collect(),
+            fs_deny: fs_deny.iter().map(|s| s.to_string()).collect(),
+            net_allow: vec![],
+            net_deny: vec![],
+            cmd_allow: vec![],
+            cmd_deny: vec![],
+            max_calls_per_minute: 60,
+            max_file_size_bytes: 10_485_760,
+            max_output_tokens: 4096,
+            max_session_duration_sec: 3600,
+            deny_patterns: vec![],
+            redact_patterns: vec![],
+            max_output_length: 50_000,
+            region: String::new(),
+            regulatory_framework: String::new(),
+            environment: String::new(),
+            classification: String::new(),
+            operating_hours: operating_hours.to_string(),
+            escalate_tools: escalate_owned,
+            escalate_paths: vec![],
+            escalate_hosts: vec![],
+            escalate_to,
+        };
+
+        let tbs_bytes = encode_canonical(&tbs).unwrap();
+        let sig = sk.sign(&tbs_bytes);
+        let envelope = CborMandate {
+            tag: "MANDATE-V1".to_string(),
+            tbs: tbs_bytes.into(),
+            signature: sig.to_bytes().to_vec().into(),
+            issuer_pubkey: vk.to_bytes().to_vec().into(),
+        };
+        encode_canonical(&envelope).unwrap()
+    }
+
+    fn signed_mandate() -> Vec<u8> {
+        build_cbor_mandate(
+            "test-agent",
+            &["read_file", "write_file"],
+            &[],
+            "",
+            "",
+            &["workspace/**"],
+            &["workspace/output/**"],
+            &["/etc/**", "~/.ssh/**", "**/*.env", "**/*secret*"],
+            24,
+        )
     }
 
     /// Build a signed mandate with specific tools listed.
-    fn cabin_mandate(tools: &[&str]) -> String {
-        let (did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("cabin-agent", &did);
-        let tools_toml = tools
-            .iter()
-            .map(|t| format!("\"{}\"", t))
-            .collect::<Vec<_>>()
-            .join(", ");
-        template = template.replace(
-            r#"tools = ["read_file", "write_file"]"#,
-            &format!("tools = [{}]", tools_toml),
-        );
-        crate::mandate::sign_mandate(&template, &secret, 24).unwrap()
+    fn cabin_mandate(tools: &[&str]) -> Vec<u8> {
+        build_cbor_mandate("cabin-agent", tools, &[], "", "", &[], &[], &[], 24)
     }
 
     /// Build a signed mandate with specific tools AND escalate_tools.
-    fn cabin_escalate_mandate(tools: &[&str], escalate_tools: &[&str]) -> String {
-        let (did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("cabin-agent", &did);
-        let tools_toml = tools
-            .iter()
-            .map(|t| format!("\"{}\"", t))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let escl_toml = escalate_tools
-            .iter()
-            .map(|t| format!("\"{}\"", t))
-            .collect::<Vec<_>>()
-            .join(", ");
-        template = template.replace(
-            r#"tools = ["read_file", "write_file"]"#,
-            &format!("tools = [{}]", tools_toml),
-        );
-        template = template.replace(
-            "escalate_tools = []",
-            &format!("escalate_tools = [{}]", escl_toml),
-        );
-        crate::mandate::sign_mandate(&template, &secret, 24).unwrap()
+    fn cabin_escalate_mandate(tools: &[&str], escalate_tools: &[&str]) -> Vec<u8> {
+        build_cbor_mandate(
+            "cabin-agent",
+            tools,
+            escalate_tools,
+            "",
+            "",
+            &[],
+            &[],
+            &[],
+            24,
+        )
     }
 
     /// Decode a hex secret key into a SigningKey for use in tests.
@@ -1031,29 +1106,33 @@ mod tests {
 
     #[test]
     fn test_tampered_mandate_denied() {
-        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, sov_secret, _) = crate::identity::generate_agent_keypair();
-        let template = crate::mandate::generate_template("tamper-test", &agent_did);
-        let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
-        let tampered = signed.replace("read_file", "execute");
+        // Tampered CBOR bytes: flip a byte in the middle
+        let cbor = signed_mandate();
+        let mut tampered = cbor.clone();
+        let mid = tampered.len() / 2;
+        tampered[mid] = if tampered[mid] == 0x00 { 0xff } else { 0x00 };
         let db = TestLedger;
         let params: serde_json::Value = serde_json::from_str("{}").unwrap();
-        let result = enforce(&tampered, "execute", &params, &db).unwrap();
-        assert_eq!(result.decision, Decision::Deny);
-        assert!(result.policy_rule.contains("mandate_invalid"));
+        let result = enforce(&tampered, "execute", &params, &db);
+        // Tampered CBOR will either fail to parse or fail signature check
+        if let Ok(v) = result {
+            assert_eq!(v.decision, Decision::Deny);
+        }
     }
 
     #[test]
     fn test_workspace_root_relative_match() {
-        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, sov_secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("workspace-test", &agent_did);
-        template = template.replace(
-            "workspace_root = \"\"",
-            "workspace_root = \"/home/agent/workspace\"",
+        let signed = build_cbor_mandate(
+            "workspace-test",
+            &["read_file", "write_file"],
+            &[],
+            "/home/agent/workspace",
+            "",
+            &["**/*.txt"],
+            &["workspace/output/**"],
+            &["/etc/**", "~/.ssh/**"],
+            24,
         );
-        template = template.replace("fs_read = [\"workspace/**\"]", "fs_read = [\"**/*.txt\"]");
-        let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({"path": "/home/agent/workspace/data/test.txt"});
         let result = decide(&signed, "read_file", &params, &db, Utc::now(), None).unwrap();
@@ -1062,14 +1141,17 @@ mod tests {
 
     #[test]
     fn test_workspace_root_empty_fallback() {
-        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, sov_secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("empty-workspace", &agent_did);
-        template = template.replace(
-            "fs_read = [\"workspace/**\"]",
-            "fs_read = [\"/home/agent/workspace/**\"]",
+        let signed = build_cbor_mandate(
+            "empty-workspace",
+            &["read_file", "write_file"],
+            &[],
+            "",
+            "",
+            &["/home/agent/workspace/**"],
+            &[],
+            &[],
+            24,
         );
-        let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({"path": "/home/agent/workspace/data/test.txt"});
         let result = decide(&signed, "read_file", &params, &db, Utc::now(), None).unwrap();
@@ -1078,14 +1160,17 @@ mod tests {
 
     #[test]
     fn test_workspace_root_deny_still_works() {
-        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, sov_secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("deny-test", &agent_did);
-        template = template.replace(
-            "workspace_root = \"\"",
-            "workspace_root = \"/home/agent/workspace\"",
+        let signed = build_cbor_mandate(
+            "deny-test",
+            &["read_file", "write_file"],
+            &[],
+            "/home/agent/workspace",
+            "",
+            &["workspace/**"],
+            &["workspace/output/**"],
+            &["/etc/**"],
+            24,
         );
-        let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({"path": "/etc/passwd"});
         let result = enforce(&signed, "read_file", &params, &db).unwrap();
@@ -1096,7 +1181,7 @@ mod tests {
     #[test]
     fn test_ttl_just_before_expiry_allows() {
         let signed = signed_mandate();
-        let m: crate::mandate::Mandate = toml::from_str(&signed).unwrap();
+        let (m, _) = crate::mandate::parse_cbor_mandate_raw(&signed).unwrap();
         let expires: DateTime<Utc> = m.mandate.expires_at.parse().unwrap();
         let just_before = expires - chrono::Duration::seconds(1);
         let db = TestLedger;
@@ -1108,7 +1193,7 @@ mod tests {
     #[test]
     fn test_ttl_at_expiry_denies() {
         let signed = signed_mandate();
-        let m: crate::mandate::Mandate = toml::from_str(&signed).unwrap();
+        let (m, _) = crate::mandate::parse_cbor_mandate_raw(&signed).unwrap();
         let expires: DateTime<Utc> = m.mandate.expires_at.parse().unwrap();
         let db = TestLedger;
         let params = serde_json::json!({});
@@ -1119,7 +1204,7 @@ mod tests {
     #[test]
     fn test_ttl_past_expiry_denies() {
         let signed = signed_mandate();
-        let m: crate::mandate::Mandate = toml::from_str(&signed).unwrap();
+        let (m, _) = crate::mandate::parse_cbor_mandate_raw(&signed).unwrap();
         let expires: DateTime<Utc> = m.mandate.expires_at.parse().unwrap();
         let db = TestLedger;
         let params = serde_json::json!({});
@@ -1131,14 +1216,17 @@ mod tests {
 
     #[test]
     fn test_jurisdiction_inside_hours_allows() {
-        let (did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("jur-test", &did);
-        template = template.replace(
-            "operating_hours = \"\"",
-            "operating_hours = \"09:00-17:00\"",
+        let signed = build_cbor_mandate(
+            "jur-test",
+            &["read_file", "write_file"],
+            &[],
+            "",
+            "09:00-17:00",
+            &["workspace/**"],
+            &[],
+            &[],
+            876_000,
         );
-        let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({});
         let noon = Utc.with_ymd_and_hms(2030, 6, 1, 12, 0, 0).unwrap();
@@ -1148,14 +1236,17 @@ mod tests {
 
     #[test]
     fn test_jurisdiction_outside_hours_denies() {
-        let (did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("jur-test2", &did);
-        template = template.replace(
-            "operating_hours = \"\"",
-            "operating_hours = \"09:00-17:00\"",
+        let signed = build_cbor_mandate(
+            "jur-test2",
+            &["read_file", "write_file"],
+            &[],
+            "",
+            "09:00-17:00",
+            &["workspace/**"],
+            &[],
+            &[],
+            876_000,
         );
-        let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({});
         let night = Utc.with_ymd_and_hms(2030, 6, 1, 2, 0, 0).unwrap();
@@ -1166,14 +1257,17 @@ mod tests {
 
     #[test]
     fn test_jurisdiction_at_end_boundary_denies() {
-        let (did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("jur-boundary", &did);
-        template = template.replace(
-            "operating_hours = \"\"",
-            "operating_hours = \"09:00-17:00\"",
+        let signed = build_cbor_mandate(
+            "jur-boundary",
+            &["read_file", "write_file"],
+            &[],
+            "",
+            "09:00-17:00",
+            &["workspace/**"],
+            &[],
+            &[],
+            876_000,
         );
-        let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
         let db = TestLedger;
         let params = serde_json::json!({});
         let just_after = Utc.with_ymd_and_hms(2030, 6, 1, 17, 1, 0).unwrap();
@@ -1353,17 +1447,17 @@ mod tests {
         std::fs::write(&outside_file, "out of bounds").unwrap();
         std::os::unix::fs::symlink(&outside_file, workspace.join("evil_link")).unwrap();
 
-        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, sov_secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("symlink-test", &agent_did);
-        template = template.replace(
-            "workspace_root = \"\"",
-            &format!(
-                "workspace_root = \"{}\"",
-                tmpdir.to_str().unwrap().replace('\\', "\\\\")
-            ),
+        let signed = build_cbor_mandate(
+            "symlink-test",
+            &["read_file", "write_file"],
+            &[],
+            tmpdir.to_str().unwrap(),
+            "",
+            &["workspace/**"],
+            &["workspace/output/**"],
+            &["/etc/**"],
+            24,
         );
-        let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
 
         let symlink_path = workspace.join("evil_link").to_str().unwrap().to_string();
@@ -1386,17 +1480,17 @@ mod tests {
         std::fs::write(outside_dir.join("report.csv"), "restricted").unwrap();
         std::os::unix::fs::symlink(&outside_dir, workspace.join("outsidedir")).unwrap();
 
-        let (agent_did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, sov_secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("symlink-dir-test", &agent_did);
-        template = template.replace(
-            "workspace_root = \"\"",
-            &format!(
-                "workspace_root = \"{}\"",
-                tmpdir.to_str().unwrap().replace('\\', "\\\\")
-            ),
+        let signed = build_cbor_mandate(
+            "symlink-dir-test",
+            &["read_file", "write_file"],
+            &[],
+            tmpdir.to_str().unwrap(),
+            "",
+            &["workspace/**"],
+            &["workspace/output/**"],
+            &["/etc/**"],
+            24,
         );
-        let signed = crate::mandate::sign_mandate(&template, &sov_secret, 24).unwrap();
         let db = TestLedger;
 
         let path_through_symdir = workspace
@@ -1771,7 +1865,7 @@ mod tests {
         let params = serde_json::json!({});
 
         // Phase 1 at t1: anchored to mandate validity window (mandate has 24-h TTL from real now)
-        let m: crate::mandate::Mandate = toml::from_str(&signed).unwrap();
+        let (m, _) = crate::mandate::parse_cbor_mandate_raw(&signed).unwrap();
         let expires: DateTime<Utc> = m.mandate.expires_at.parse().unwrap();
         let t1 = expires - chrono::Duration::hours(1);
         let v1 = decide(&signed, "WINDOW_POS", &params, &db, t1, Some(&parked)).unwrap();
@@ -1817,14 +1911,17 @@ mod tests {
     /// state_trust = "attested" when VerifiedVehicleState was produced by AttestedVehicleState::verify().
     #[test]
     fn test_state_trust_attested_recorded() {
-        let (did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("trust-test-attested", &did);
-        template = template.replace(
-            r#"tools = ["read_file", "write_file"]"#,
-            r#"tools = ["HVAC_TEMPERATURE_SET"]"#,
+        let signed = build_cbor_mandate(
+            "trust-test-attested",
+            &["HVAC_TEMPERATURE_SET"],
+            &[],
+            "",
+            "",
+            &[],
+            &[],
+            &[],
+            876_000,
         );
-        let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
         let (_, attester_secret, _) = crate::identity::generate_agent_keypair();
         let attester_key = signing_key_from_hex(&attester_secret);
         let pubkey_hex = hex::encode(attester_key.verifying_key().to_bytes());
@@ -1863,14 +1960,17 @@ mod tests {
     /// state_trust = "operator_trusted" when VerifiedVehicleState came from from_operator_trusted().
     #[test]
     fn test_state_trust_operator_trusted_recorded() {
-        let (did, _, _) = crate::identity::generate_agent_keypair();
-        let (_, secret, _) = crate::identity::generate_agent_keypair();
-        let mut template = crate::mandate::generate_template("trust-test-operator", &did);
-        template = template.replace(
-            r#"tools = ["read_file", "write_file"]"#,
-            r#"tools = ["HVAC_TEMPERATURE_SET"]"#,
+        let signed = build_cbor_mandate(
+            "trust-test-operator",
+            &["HVAC_TEMPERATURE_SET"],
+            &[],
+            "",
+            "",
+            &[],
+            &[],
+            &[],
+            876_000,
         );
-        let signed = crate::mandate::sign_mandate(&template, &secret, 876_000).unwrap();
         let state = crate::vehicle::VehicleState {
             speed_mmps: 0,
             gear: crate::vehicle::Gear::Park,

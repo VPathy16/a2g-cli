@@ -1,12 +1,41 @@
 //! Declarative Policy Test Harness — Golden case testing for mandate enforcement
 //!
 //! Allows defining test cases as TOML: "given this mandate + tool call → expected decision".
-//! Each test specifies a mandate (inline or file path), a tool call, and the expected
-//! enforcement outcome. The harness runs each case through the real enforce() pipeline.
+//! Each test specifies a mandate (inline TOML or binary CBOR file path), a tool call, and
+//! the expected enforcement outcome. The harness runs each case through the real enforce()
+//! pipeline.
+//!
+//! mandate_path: path to a compiled CBOR mandate file (binary).
+//! mandate_inline: inline TOML mandate body (compiled to CBOR on the fly).
 
 use a2g_core::enforce;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+/// Compile an inline TOML mandate string to signed CBOR bytes using a deterministic test key.
+///
+/// The generated key is derived from a fixed seed so that tests are reproducible.
+/// This is for harness use only — never use fixed-seed keys in production.
+fn compile_inline_mandate(toml_str: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use ed25519_dalek::SigningKey;
+    // Fixed seed for reproducible test compilation
+    let seed = [0x54u8; 32];
+    let signing_key = SigningKey::from_bytes(&seed);
+    let verifying_key = signing_key.verifying_key();
+    let key_hex = hex::encode(seed);
+
+    // Derive agent_did from the test key so the mandate is internally consistent
+    let pubkey_bytes = verifying_key.to_bytes();
+    let issuer_did = format!("did:a2g:{}", bs58::encode(&pubkey_bytes).into_string());
+
+    // Parse TOML and patch agent_did if empty
+    let mut m = crate::mandate_compile::parse_toml_mandate(toml_str)?;
+    if m.mandate.agent_did.is_empty() {
+        m.mandate.agent_did = issuer_did;
+    }
+
+    crate::mandate_compile::compile_mandate(&m, &key_hex, 8760, "")
+}
 
 /// A single declarative policy test case
 #[derive(Debug, Clone, Deserialize)]
@@ -110,12 +139,16 @@ fn run_single_test(test: &PolicyTest, ledger_path: &Path) -> TestResult {
         reason,
     };
 
-    // Load mandate (inline or from file)
-    let mandate_str = if !test.mandate_inline.is_empty() {
-        test.mandate_inline.clone()
+    // Load mandate: inline TOML is compiled to CBOR on the fly; file path is read as binary CBOR.
+    let mandate_cbor: Vec<u8> = if !test.mandate_inline.is_empty() {
+        // Inline TOML: parse and compile with a test-only throw-away key
+        match compile_inline_mandate(&test.mandate_inline) {
+            Ok(b) => b,
+            Err(e) => return fail(format!("failed to compile inline mandate: {}", e)),
+        }
     } else if !test.mandate_path.is_empty() {
-        match std::fs::read_to_string(&test.mandate_path) {
-            Ok(s) => s,
+        match std::fs::read(&test.mandate_path) {
+            Ok(b) => b,
             Err(e) => {
                 return fail(format!(
                     "failed to read mandate '{}': {}",
@@ -147,7 +180,7 @@ fn run_single_test(test: &PolicyTest, ledger_path: &Path) -> TestResult {
     };
 
     // Run enforcement
-    match enforce::enforce(&mandate_str, &test.tool, &params, &db) {
+    match enforce::enforce(&mandate_cbor, &test.tool, &params, &db) {
         Ok(verdict) => {
             let actual_decision = format!("{}", verdict.decision);
             let actual_rule = verdict.policy_rule.clone();

@@ -12,6 +12,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "hex",
+ "minicbor",
  "rand 0.8.5",
  "rusqlite",
  "serde",
@@ -32,6 +33,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "hex",
+ "minicbor",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -57,7 +59,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "toml",
  "uuid",
 ]
 
@@ -73,6 +74,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "libc",
+ "minicbor",
  "rand 0.8.5",
  "serde_json",
  "tempfile",
@@ -84,6 +86,7 @@ name = "a2g-ffi"
 version = "0.1.0"
 dependencies = [
  "a2g-core",
+ "bs58",
  "cbindgen",
  "chrono",
  "ed25519-dalek",
@@ -92,6 +95,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

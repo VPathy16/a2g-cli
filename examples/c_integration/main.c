@@ -64,7 +64,7 @@ static void print_verdict(const A2gVerdictHandle *h) {
  * vehicle state.  We pass operator-trusted vehicle state here to show that the
  * state_trust field is populated on the verdict.
  */
-static void demo_allow(const char *mandate) {
+static void demo_allow(const uint8_t *cbor, uintptr_t cbor_len) {
     printf("\n=== Demo 1: ALLOW (read_file, parked, driver) ===\n");
 
     /* Create an operator-trusted vehicle state: parked (gear=0), 0 km/h, driver (actor=0).
@@ -80,7 +80,7 @@ static void demo_allow(const char *mandate) {
     }
 
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(mandate, "read_file", "{}", state, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "read_file", "{}", state, &verdict);
 
     assert(verdict != NULL);
     print_verdict(verdict);
@@ -109,11 +109,11 @@ static void demo_allow(const char *mandate) {
  * delete_all_data is hard-denied before any mandate check — no mandate content
  * can override a Forbidden-domain classification.  No vehicle state is needed.
  */
-static void demo_deny(const char *mandate) {
+static void demo_deny(const uint8_t *cbor, uintptr_t cbor_len) {
     printf("\n=== Demo 2: DENY (delete_all_data, forbidden domain) ===\n");
 
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(mandate, "delete_all_data", "{}", NULL, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, "delete_all_data", "{}", NULL, &verdict);
 
     assert(verdict != NULL);
     print_verdict(verdict);
@@ -145,12 +145,13 @@ static void demo_deny(const char *mandate) {
  *
  * See docs/INTEGRATION.md §Phase 1 → Phase 2 for the full sequence.
  */
-static int demo_dispatch(const char *mandate,
+static int demo_dispatch(const uint8_t *cbor,
+                         uintptr_t cbor_len,
                          const char *tool,
                          const char *params_json,
                          A2gVerifiedStateHandle *state) {
     A2gVerdictHandle *verdict = NULL;
-    A2gDecision d = a2g_decide(mandate, tool, params_json, state, &verdict);
+    A2gDecision d = a2g_decide(cbor, cbor_len, tool, params_json, state, &verdict);
 
     assert(verdict != NULL);  /* always written, even on error */
 
@@ -189,7 +190,7 @@ static int demo_dispatch(const char *mandate,
          *
          *   3. When the human approver returns a signed ApprovalGrant JSON
          *      (grant_json), call a2g_decide_with_approval() with:
-         *        - the same mandate_toml, tool, params_json, state as Phase 1
+         *        - the same cbor/cbor_len, tool, params_json, state as Phase 1
          *        - the unmodified binding_json from step 1
          *        - the grant_json from the approver
          *
@@ -201,7 +202,7 @@ static int demo_dispatch(const char *mandate,
          *   const char *binding_json = a2g_verdict_binding_json(verdict);
          *   A2gVerdictHandle *verdict2 = NULL;
          *   A2gDecision d2 = a2g_decide_with_approval(
-         *       mandate, tool, params_json, state,
+         *       cbor, cbor_len, tool, params_json, state,
          *       binding_json, grant_json, &verdict2);
          *   if (d2 == A2G_DECISION_ALLOW) { forward_to_enforcing_writer(); }
          *   a2g_verdict_free(verdict2);
@@ -229,10 +230,10 @@ static int demo_dispatch(const char *mandate,
 static void demo_error_paths(void) {
     printf("\n=== Demo 4: Error handling ===\n");
 
-    /* NULL mandate → A2G_DECISION_ERROR (never crashes, returns error verdict) */
+    /* NULL mandate bytes → A2G_DECISION_ERROR (never crashes, returns error verdict) */
     {
         A2gVerdictHandle *verdict = NULL;
-        A2gDecision d = a2g_decide(NULL, "read_file", "{}", NULL, &verdict);
+        A2gDecision d = a2g_decide(NULL, 0, "read_file", "{}", NULL, &verdict);
         assert(d == A2G_DECISION_ERROR && verdict != NULL);
         printf("  NULL mandate            → %s  [PASS]\n", decision_name(d));
         a2g_verdict_free(verdict);
@@ -261,23 +262,24 @@ int main(void) {
     printf("A2G C Integration Example\n");
     printf("=========================\n");
 
-    /* Obtain a test mandate signed with an ephemeral issuer key.
+    /* Obtain a test mandate compiled to signed CBOR bytes (ADR-0013).
      * In production, mandates are issued by your trust root (issuer DID),
-     * signed over the canonical payload MANDATE:<agent>:<issuer>:<expires>:<caps_hash>.
-     * The mandate TOML is then embedded in the agent process or loaded from
-     * a secure store at startup. */
-    char *mandate = a2g_test_mandate_toml();
-    if (mandate == NULL) {
-        fprintf(stderr, "FATAL: a2g_test_mandate_toml() returned NULL\n");
+     * compiled from TOML authoring format to CBOR by `a2g sign`, and loaded
+     * from a secure store at agent startup.
+     * Free the buffer with a2g_cbor_free(cbor, cbor_len) when done. */
+    uint8_t *cbor = NULL;
+    uintptr_t cbor_len = 0;
+    if (a2g_test_mandate_cbor(&cbor, &cbor_len) != 0 || cbor == NULL) {
+        fprintf(stderr, "FATAL: a2g_test_mandate_cbor() failed\n");
         return 1;
     }
-    printf("Mandate obtained (%zu bytes)\n", strlen(mandate));
+    printf("Mandate obtained (%zu bytes)\n", (size_t)cbor_len);
 
     /* Demo 1: ALLOW */
-    demo_allow(mandate);
+    demo_allow(cbor, cbor_len);
 
     /* Demo 2: DENY */
-    demo_deny(mandate);
+    demo_deny(cbor, cbor_len);
 
     /* Demo 3: Full dispatch showing all four verdict types.
      *
@@ -292,11 +294,11 @@ int main(void) {
             a2g_verified_state_operator_trusted(0.0, 0, 0);
         assert(state != NULL);
 
-        demo_dispatch(mandate, "read_file",  "{}", state);
-        demo_dispatch(mandate, "write_file", "{\"path\":\"workspace/output/log.txt\"}", state);
+        demo_dispatch(cbor, cbor_len, "read_file",  "{}", state);
+        demo_dispatch(cbor, cbor_len, "write_file", "{\"path\":\"workspace/output/log.txt\"}", state);
 
         /* Forbidden tool — always DENY regardless of state or mandate content. */
-        demo_dispatch(mandate, "delete_all_data", "{}", state);
+        demo_dispatch(cbor, cbor_len, "delete_all_data", "{}", state);
 
         a2g_verified_state_free(state);
     }
@@ -304,8 +306,8 @@ int main(void) {
     /* Demo 4: Error paths */
     demo_error_paths();
 
-    /* Always free the mandate string with a2g_string_free — not free(). */
-    a2g_string_free(mandate);
+    /* Free the CBOR mandate buffer with a2g_cbor_free — not free(). */
+    a2g_cbor_free(cbor, cbor_len);
 
     printf("\nAll demos completed successfully.\n");
     printf("\nNOTE: PENDING_APPROVAL is not triggered in this demo because the\n");

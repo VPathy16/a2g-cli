@@ -8,6 +8,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Breaking
 
+- **Mandate distribution format changed to canonical CBOR (ADR-0013)**
+  — mandates compile to signed CBOR for distribution and verification. TOML is the authoring format only (CLI layer). Resolves no_std Blocker #2 (`toml` removed from `a2g-core`).
+  - `decide()`, `enforce()`, `decide_with_approval()` now accept `mandate_cbor: &[u8]` instead of `mandate_str: &str`. All call sites updated.
+  - FFI ABI: `a2g_decide(const uint8_t *mandate_cbor, size_t mandate_cbor_len, ...)` replaces the former `const char *mandate_toml` parameter. `a2g.h` updated.
+  - New CBOR types: `MandateTbs` (33-field positional array, `#[n(0)]`–`#[n(32)]`) and `CborMandate` (`["MANDATE-V1", tbs_bstr, sig_64B, pubkey_32B]`) in `a2g_core::cbor`.
+  - Signing: ed25519 over `encode_canonical(&MandateTbs)` bytes (Option b, consistent with BindingPayload/GrantPayload from ADR-0011).
+  - `capabilities_hash` (§4.5 SHA-256 of sorted tools joined with `\n`) preserved as `bstr` field in `MandateTbs`; verifier re-derives and checks.
+  - `issuer_did` in TBS is verified against `issuer_pubkey` (`did:a2g:<bs58(pubkey)>`).
+  - Old TOML mandates are rejected at parse time. Re-sign with `a2g sign`.
+  - New CLI module: `a2g-cli/src/mandate_compile.rs` — TOML→CBOR compile+sign path.
+  - `toml` dep **removed** from `a2g-core/Cargo.toml` (remains in `a2g-cli`).
+  - New public API: `verify_cbor_mandate(cbor: &[u8], now: DateTime<Utc>) -> Result<MandateInfo, A2gError>`.
+  - No dual-accept fallback.
+
 - **Unified error type `A2gError` replaces `Box<dyn std::error::Error>` across a2g-core public API (ADR-0012)**
   — `a2g-core` no longer requires `std::error::Error` on the decision path (no_std Blocker #1 resolved).
   - `ApprovalGrantError` enum **removed** from `hitl.rs`. Variants map to `A2gError::BindingMismatch`, `A2gError::GrantExpired`, `A2gError::InvalidKey`, `A2gError::SignatureInvalid`.

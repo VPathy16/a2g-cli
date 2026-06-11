@@ -504,29 +504,77 @@ fn beat4_hitl_door_unlock(socket_path: &Path, demo_keys: &DemoKeys) -> GatewayRe
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn make_mandate(tools: &[&str], escalate_tools: &[&str]) -> String {
+fn make_mandate(tools: &[&str], escalate_tools: &[&str]) -> Vec<u8> {
+    use a2g_core::cbor::{encode_canonical, CborMandate, MandateTbs};
+    use a2g_core::mandate::capabilities_hash;
+    use ed25519_dalek::{Signer, SigningKey};
+    use minicbor::bytes::ByteVec;
+
     let (did, _, _) = a2g_core::identity::generate_agent_keypair();
-    let (_, secret, _) = a2g_core::identity::generate_agent_keypair();
-    let tools_str = tools
-        .iter()
-        .map(|t| format!(r#""{t}""#))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let esc_str = escalate_tools
-        .iter()
-        .map(|t| format!(r#""{t}""#))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut tmpl = a2g_core::mandate::generate_template("demo-agent", &did);
-    tmpl = tmpl.replace(
-        r#"tools = ["read_file", "write_file"]"#,
-        &format!("tools = [{tools_str}]"),
-    );
-    tmpl = tmpl.replace(
-        "escalate_tools = []",
-        &format!("escalate_tools = [{esc_str}]"),
-    );
-    a2g_core::mandate::sign_mandate(&tmpl, &secret, 24).unwrap()
+    let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let verifying_key = signing_key.verifying_key();
+    let pubkey_bytes = verifying_key.to_bytes();
+    let issuer_did = format!("did:a2g:{}", bs58::encode(&pubkey_bytes).into_string());
+
+    let tools_owned: Vec<String> = tools.iter().map(|t| t.to_string()).collect();
+    let escalate_owned: Vec<String> = escalate_tools.iter().map(|t| t.to_string()).collect();
+
+    let now = chrono::Utc::now();
+    let expires_at = now
+        .checked_add_signed(chrono::Duration::hours(24))
+        .unwrap_or(now);
+
+    let cap_hash_hex = capabilities_hash(&tools_owned);
+    let cap_hash_bytes = hex::decode(&cap_hash_hex).unwrap();
+
+    let tbs = MandateTbs {
+        tag: "MANDATE".to_string(),
+        agent_did: did.clone(),
+        issuer_did: issuer_did.clone(),
+        agent_name: "demo-agent".to_string(),
+        issued_at: now.to_rfc3339(),
+        expires_at: expires_at.to_rfc3339(),
+        proposal_hash: String::new(),
+        workspace_root: String::new(),
+        capabilities_hash: ByteVec::from(cap_hash_bytes),
+        tools: tools_owned,
+        fs_read: vec![],
+        fs_write: vec![],
+        fs_deny: vec![],
+        net_allow: vec![],
+        net_deny: vec![],
+        cmd_allow: vec![],
+        cmd_deny: vec![],
+        max_calls_per_minute: 60,
+        max_file_size_bytes: 10_485_760,
+        max_output_tokens: 4096,
+        max_session_duration_sec: 3600,
+        deny_patterns: vec![],
+        redact_patterns: vec![],
+        max_output_length: 50_000,
+        region: String::new(),
+        regulatory_framework: String::new(),
+        environment: String::new(),
+        classification: String::new(),
+        operating_hours: String::new(),
+        escalate_tools: escalate_owned,
+        escalate_paths: vec![],
+        escalate_hosts: vec![],
+        escalate_to: String::new(),
+    };
+
+    let tbs_bytes = encode_canonical(&tbs).unwrap();
+    let signature = signing_key.sign(&tbs_bytes);
+    let sig_bytes = signature.to_bytes().to_vec();
+
+    let envelope = CborMandate {
+        tag: "MANDATE-V1".to_string(),
+        tbs: ByteVec::from(tbs_bytes),
+        signature: ByteVec::from(sig_bytes),
+        issuer_pubkey: ByteVec::from(pubkey_bytes.to_vec()),
+    };
+
+    encode_canonical(&envelope).unwrap()
 }
 
 fn print_beat_header(num: u8, title: &str, expected: &str, description: &str) {

@@ -37,11 +37,12 @@ typedef struct A2gVerifiedStateHandle A2gVerifiedStateHandle;
 // Evaluate a governance decision (Phase 1).
 //
 // # Parameters
-// - `mandate_toml` — NUL-terminated TOML mandate string (UTF-8).
-// - `tool`         — NUL-terminated tool name (UTF-8).
-// - `params_json`  — NUL-terminated JSON object of tool parameters (UTF-8).
+// - `mandate_cbor`     — Pointer to signed CBOR mandate bytes (ADR-0013).
+// - `mandate_cbor_len` — Length of the CBOR buffer in bytes.
+// - `tool`             — NUL-terminated tool name (UTF-8).
+// - `params_json`      — NUL-terminated JSON object of tool parameters (UTF-8).
 //   Pass `"{}"` for no parameters.
-// - `state`        — Optional verified vehicle state handle, or NULL.
+// - `state`            — Optional verified vehicle state handle, or NULL.
 //   NULL triggers the fail-safe default (denies Sensitive tools).
 //
 // # Returns
@@ -52,9 +53,12 @@ typedef struct A2gVerifiedStateHandle A2gVerifiedStateHandle;
 // `*out_verdict` is always written on return (never NULL). Free with `a2g_verdict_free`.
 //
 // # Safety
-// All pointer parameters must be valid NUL-terminated UTF-8 strings or NULL (for `state`).
+// `mandate_cbor` must be valid for `mandate_cbor_len` bytes.
+// `tool` and `params_json` must be valid NUL-terminated UTF-8 strings.
+// `state` must be NULL or a valid non-freed handle.
 // `out_verdict` must be a valid non-null writable pointer.
-A2gDecision a2g_decide(const char *mandate_toml,
+A2gDecision a2g_decide(const uint8_t *mandate_cbor,
+                       uintptr_t mandate_cbor_len,
                        const char *tool,
                        const char *params_json,
                        const struct A2gVerifiedStateHandle *state,
@@ -63,14 +67,15 @@ A2gDecision a2g_decide(const char *mandate_toml,
 // Evaluate a governance decision with a pre-validated human approval (Phase 2).
 //
 // # Parameters
-// - `mandate_toml`  — same mandate used in Phase 1.
-// - `tool`          — same tool used in Phase 1.
-// - `params_json`   — same parameters used in Phase 1.
-// - `state`         — same vehicle state handle used in Phase 1, or NULL.
-// - `binding_json`  — MAC-protected binding JSON from Phase 1.
+// - `mandate_cbor`     — same CBOR mandate bytes used in Phase 1.
+// - `mandate_cbor_len` — length of the CBOR buffer in bytes.
+// - `tool`             — same tool used in Phase 1.
+// - `params_json`      — same parameters used in Phase 1.
+// - `state`            — same vehicle state handle used in Phase 1, or NULL.
+// - `binding_json`     — MAC-protected binding JSON from Phase 1.
 //   Obtain with `a2g_verdict_binding_json`. **Do not modify** — any field
 //   change invalidates the MAC and returns `A2G_DECISION_ERROR`.
-// - `grant_json`    — JSON-serialised `ApprovalGrant` from the human approver.
+// - `grant_json`       — JSON-serialised `ApprovalGrant` from the human approver.
 //
 // # Returns
 // `A2G_DECISION_ALLOW` on success; `A2G_DECISION_DENY` on policy failure;
@@ -79,7 +84,8 @@ A2gDecision a2g_decide(const char *mandate_toml,
 //
 // # Safety
 // Same requirements as `a2g_decide`.
-A2gDecision a2g_decide_with_approval(const char *mandate_toml,
+A2gDecision a2g_decide_with_approval(const uint8_t *mandate_cbor,
+                                     uintptr_t mandate_cbor_len,
                                      const char *tool,
                                      const char *params_json,
                                      const struct A2gVerifiedStateHandle *state,
@@ -191,11 +197,22 @@ void a2g_verdict_free(struct A2gVerdictHandle *handle);
 // `handle` must be either NULL or a valid non-freed pointer from a state constructor.
 void a2g_verified_state_free(struct A2gVerifiedStateHandle *handle);
 
-// Return a test mandate TOML string that callers can use in smoke tests.
+// Return a signed CBOR mandate for smoke-testing the FFI.
 //
-// The returned buffer must be freed with `a2g_string_free`.
-// Returns NULL on allocation failure.
-char *a2g_test_mandate_toml(void);
+// Writes the mandate CBOR bytes to `*out_cbor` (caller must free with `a2g_cbor_free`)
+// and the byte count to `*out_len`. Returns 0 on success, -1 on failure.
+//
+// # Safety
+// `out_cbor` and `out_len` must be valid non-null writable pointers.
+int32_t a2g_test_mandate_cbor(uint8_t **out_cbor, uintptr_t *out_len);
+
+// Free CBOR bytes returned by `a2g_test_mandate_cbor`.
+//
+// # Safety
+// `ptr` must be either NULL or a pointer returned by `a2g_test_mandate_cbor`, and
+// `len` must be the same length as was written to `*out_len`.
+// After this call the pointer is invalid.
+void a2g_cbor_free(uint8_t *ptr, uintptr_t len);
 
 // Free a string returned by `a2g_test_mandate_toml` or other string-returning functions.
 //
