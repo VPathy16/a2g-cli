@@ -2272,10 +2272,6 @@ mod tests {
         tools: &[&str],
         ttl_hours: u64,
     ) -> (Vec<u8>, [u8; 32]) {
-        use crate::cbor::{encode_canonical, CborMandate, MandateTbs};
-        use crate::mandate::capabilities_hash;
-        use ed25519_dalek::Signer;
-
         let (agent_did, secret, _) = crate::identity::generate_agent_keypair();
         let secret_bytes = hex::decode(&secret).unwrap();
         let secret_arr: [u8; 32] = secret_bytes.as_slice().try_into().unwrap();
