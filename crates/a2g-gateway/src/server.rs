@@ -21,10 +21,10 @@ use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-use a2g_core::hitl::{ApprovalGrant, PendingApprovalBinding};
+use a2g_core::hitl::{ApprovalGrant, PendingApprovalBinding, SignedBinding};
 use a2g_core::vehicle::{AttestedVehicleState, ATTESTATION_FRESHNESS_MS};
 use chrono::Utc;
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 use crate::bus;
 use crate::forbidden;
@@ -147,6 +147,9 @@ fn handle_request(req: GatewayRequest, state: &Arc<GatewayState>) -> GatewayResp
             receipt_verifying_key_hex: state.demo_keys.receipt_verifying_key_hex.clone(),
             attester_verifying_key_hex: state.demo_keys.attester_verifying_key_hex.clone(),
             operator_verifying_key_hex: state.demo_keys.operator_verifying_key_hex.clone(),
+            binding_verifying_key_hex: hex::encode(
+                state.keys.binding_signing_key.verifying_key().to_bytes(),
+            ),
         },
 
         GatewayRequest::SignBinding { binding_json } => handle_sign_binding(binding_json, state),
@@ -169,22 +172,15 @@ fn handle_sign_binding(binding_json: String, state: &Arc<GatewayState>) -> Gatew
         }
     };
 
-    // Sign with gateway's binding key (never shared — closes ADR-0009 interim).
-    let payload = match binding_bytes(&binding) {
-        Ok(b) => b,
+    // Sign with gateway's binding key (never shared — closes ADR-0009 interim;
+    // sole signer per ADR-0015 / SPEC §9.8).
+    let signed = match SignedBinding::sign(&binding, &state.keys.binding_signing_key) {
+        Ok(s) => s,
         Err(e) => {
             return GatewayResponse::Error {
                 message: format!("binding encoding error: {e}"),
             }
         }
-    };
-    let sig: ed25519_dalek::Signature = state.keys.binding_signing_key.sign(&payload);
-    let signed = SignedBindingWire {
-        binding_id: binding.binding_id.clone(),
-        request_hash: binding.request_hash.clone(),
-        escalate_to: binding.escalate_to.clone(),
-        ttl_expires_at: binding.ttl_expires_at.to_rfc3339(),
-        a2g_mac: hex::encode(sig.to_bytes()),
     };
 
     let signed_json = match serde_json::to_string(&signed) {
@@ -405,50 +401,16 @@ fn refuse(reason: &str) -> GatewayResponse {
 }
 
 // ── SignedBinding wire format ─────────────────────────────────────────────────
-
-/// Wire format for the signed binding blob (matches a2g-ffi's SignedBinding).
-/// The gateway is now the authoritative signer (closes ADR-0009 §binding-key interim).
-#[derive(serde::Serialize, serde::Deserialize)]
-struct SignedBindingWire {
-    binding_id: String,
-    request_hash: String,
-    escalate_to: String,
-    ttl_expires_at: String,
-    /// Hex ed25519 signature over `binding_payload()`.
-    a2g_mac: String,
-}
-
-/// Canonical CBOR bytes signed by the gateway's binding key (ADR-0011).
-fn binding_bytes(b: &PendingApprovalBinding) -> Result<Vec<u8>, a2g_core::A2gError> {
-    let hash_bytes =
-        hex::decode(&b.request_hash).map_err(|e| a2g_core::A2gError::HexDecode(e.to_string()))?;
-    a2g_core::cbor::encode_canonical(&a2g_core::cbor::BindingPayload {
-        tag: "BINDING".to_string(),
-        binding_id: b.binding_id.clone(),
-        request_hash: hash_bytes.into(),
-        escalate_to: b.escalate_to.clone(),
-        ttl_unix_secs: b.ttl_expires_at.timestamp(),
-    })
-}
+// The wire type is `a2g_core::hitl::SignedBinding` — one shared definition for
+// the gateway (signer) and the rich domain (verifier). The gateway is the sole
+// signer (ADR-0015; closes ADR-0009 §binding-key interim).
 
 /// Verify a signed binding blob produced by this gateway (used by Phase 2 receipt signers).
 pub fn verify_signed_binding(
     signed_json: &str,
     binding_key_verifying: &VerifyingKey,
 ) -> Option<PendingApprovalBinding> {
-    let wire: SignedBindingWire = serde_json::from_str(signed_json).ok()?;
-    let ttl = wire.ttl_expires_at.parse::<chrono::DateTime<Utc>>().ok()?;
-    let binding = PendingApprovalBinding {
-        binding_id: wire.binding_id.clone(),
-        request_hash: wire.request_hash.clone(),
-        escalate_to: wire.escalate_to.clone(),
-        ttl_expires_at: ttl,
-    };
-    let payload = binding_bytes(&binding).ok()?;
-    let sig_bytes: [u8; 64] = hex::decode(&wire.a2g_mac).ok()?.try_into().ok()?;
-    let sig = Signature::from_bytes(&sig_bytes);
-    binding_key_verifying.verify(&payload, &sig).ok()?;
-    Some(binding)
+    SignedBinding::verify_json(signed_json, binding_key_verifying).ok()
 }
 
 /// Set of nonces from the most recent batch (used by test helpers to verify anti-replay).

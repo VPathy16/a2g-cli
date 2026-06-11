@@ -166,6 +166,10 @@ pub enum GatewayResponse {
         receipt_verifying_key_hex: String,
         attester_verifying_key_hex: String,
         operator_verifying_key_hex: String,
+        /// Gateway's binding verifying key — the rich domain verifies
+        /// gateway-signed bindings at Phase 2 with this (ADR-0015).
+        #[serde(default)]
+        binding_verifying_key_hex: String,
     },
 
     Error {

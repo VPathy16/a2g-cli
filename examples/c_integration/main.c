@@ -183,9 +183,13 @@ static int demo_dispatch(const uint8_t *cbor,
         /*
          * PHASE 1 SUCCEEDED — Human approval is required before execution.
          *
-         * Steps:
-         *   1. Retrieve the MAC-protected binding JSON.  Do NOT modify any
-         *      field — a tampered MAC causes Phase 2 to return ERROR.
+         * Steps (ADR-0015 — the binding-signing key lives in the gateway):
+         *   1. Retrieve the UNSIGNED binding JSON from the Phase 1 verdict and
+         *      present it to the Enforcing Gateway's SignBinding operation.
+         *      The gateway validates, signs with its binding key, queues the
+         *      entry, and returns the signed blob.  Do NOT modify any field of
+         *      the signed blob — a tampered signature causes Phase 2 to return
+         *      ERROR.
          *
          *   2. Retrieve binding_id, request_hash, and the escalate_to DID from
          *      the binding JSON.  Forward these to your approval backend
@@ -194,7 +198,10 @@ static int demo_dispatch(const uint8_t *cbor,
          *   3. When the human approver returns a signed ApprovalGrant JSON
          *      (grant_json), call a2g_decide_with_approval() with:
          *        - the same cbor/cbor_len, tool, params_json, state as Phase 1
-         *        - the unmodified binding_json from step 1
+         *        - the GATEWAY-SIGNED binding blob from step 1
+         *        - the gateway's 32-byte binding VERIFYING key (from your
+         *          provisioning / the gateway's GetPublicKeys operation);
+         *          passing NULL returns A2G_DECISION_ERROR (fail-explicit)
          *        - the grant_json from the approver
          *
          *   4. Phase 2 returns A2G_DECISION_ALLOW on success.  Free both
@@ -202,11 +209,13 @@ static int demo_dispatch(const uint8_t *cbor,
          *
          * Example Phase 2 call:
          *
-         *   const char *binding_json = a2g_verdict_binding_json(verdict);
+         *   const char *unsigned_binding = a2g_verdict_binding_json(verdict);
+         *   char *signed_binding = gateway_sign_binding(unsigned_binding);
+         *   const uint8_t gw_binding_pubkey[32] = { ... provisioned ... };
          *   A2gVerdictHandle *verdict2 = NULL;
          *   A2gDecision d2 = a2g_decide_with_approval(
          *       cbor, cbor_len, tool, params_json, state,
-         *       binding_json, grant_json, trust, &verdict2);
+         *       signed_binding, gw_binding_pubkey, grant_json, trust, &verdict2);
          *   if (d2 == A2G_DECISION_ALLOW) { forward_to_enforcing_writer(); }
          *   a2g_verdict_free(verdict2);
          *
@@ -218,7 +227,8 @@ static int demo_dispatch(const uint8_t *cbor,
         break;
 
     default:
-        /* A2G_DECISION_ERROR — invalid input, internal error, or tampered MAC. */
+        /* A2G_DECISION_ERROR — invalid input, internal error, or a binding
+         * that the gateway's binding key did not sign. */
         fprintf(stderr, "    ERROR: rule=%s\n", a2g_verdict_policy_rule(verdict));
         a2g_verdict_free(verdict);
         return -1;

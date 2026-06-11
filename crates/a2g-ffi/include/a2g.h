@@ -93,9 +93,11 @@ void a2g_trust_anchor_free(struct A2gTrustAnchorHandle *handle);
 //   a handle and express your trust policy explicitly.
 //
 // # Returns
-// An `A2gDecision` integer. On `A2G_DECISION_PENDING_APPROVAL` the binding is
-// accessible via `a2g_verdict_binding_json` on the handle written to `*out_verdict`.
-// The binding JSON is MAC-protected — pass it unmodified to `a2g_decide_with_approval`.
+// An `A2gDecision` integer. On `A2G_DECISION_PENDING_APPROVAL` the **unsigned**
+// binding is accessible via `a2g_verdict_binding_json` on the handle written to
+// `*out_verdict`. Present it to the Enforcing Gateway's SignBinding operation;
+// the gateway returns the signed blob to pass to `a2g_decide_with_approval`
+// (ADR-0015 — this library holds no binding-signing key).
 //
 // `*out_verdict` is always written on return (never NULL). Free with `a2g_verdict_free`.
 //
@@ -117,31 +119,37 @@ A2gDecision a2g_decide(const uint8_t *mandate_cbor,
 // Evaluate a governance decision with a pre-validated human approval (Phase 2).
 //
 // # Parameters
-// - `mandate_cbor`     — same CBOR mandate bytes used in Phase 1.
-// - `mandate_cbor_len` — length of the CBOR buffer in bytes.
-// - `tool`             — same tool used in Phase 1.
-// - `params_json`      — same parameters used in Phase 1.
-// - `state`            — same vehicle state handle used in Phase 1, or NULL.
-// - `binding_json`     — MAC-protected binding JSON from Phase 1.
-//   Obtain with `a2g_verdict_binding_json`. **Do not modify** — any field
-//   change invalidates the MAC and returns `A2G_DECISION_ERROR`.
-// - `grant_json`       — JSON-serialised `ApprovalGrant` from the human approver.
-// - `trust`            — Trust anchor handle (ADR-0014). Must not be NULL.
+// - `mandate_cbor`        — same CBOR mandate bytes used in Phase 1.
+// - `mandate_cbor_len`    — length of the CBOR buffer in bytes.
+// - `tool`                — same tool used in Phase 1.
+// - `params_json`         — same parameters used in Phase 1.
+// - `state`               — same vehicle state handle used in Phase 1, or NULL.
+// - `signed_binding_json` — **gateway-signed** binding blob from the gateway's
+//   SignBinding operation (ADR-0015). **Do not modify** — any field change
+//   invalidates the gateway signature and returns `A2G_DECISION_ERROR`.
+// - `binding_pubkey`      — 32-byte ed25519 **verifying** key of the gateway's
+//   binding-signing key. **Must not be NULL** — there is no in-process fallback
+//   key (fail-explicit). Obtain from gateway provisioning / GetPublicKeys.
+// - `grant_json`          — JSON-serialised `ApprovalGrant` from the human approver.
+// - `trust`               — Trust anchor handle (ADR-0014). Must not be NULL.
 //   Same handle used in Phase 1 is recommended.
 //
 // # Returns
 // `A2G_DECISION_ALLOW` on success; `A2G_DECISION_DENY` on policy failure;
-// `A2G_DECISION_ERROR` on tampered binding, invalid JSON, or internal error.
+// `A2G_DECISION_ERROR` on tampered/unsigned binding, NULL `binding_pubkey`,
+// invalid JSON, or internal error.
 // `*out_verdict` is always written. Free with `a2g_verdict_free`.
 //
 // # Safety
-// Same requirements as `a2g_decide`.
+// Same requirements as `a2g_decide`; additionally `binding_pubkey` must be
+// NULL or valid for 32 bytes.
 A2gDecision a2g_decide_with_approval(const uint8_t *mandate_cbor,
                                      uintptr_t mandate_cbor_len,
                                      const char *tool,
                                      const char *params_json,
                                      const struct A2gVerifiedStateHandle *state,
-                                     const char *binding_json,
+                                     const char *signed_binding_json,
+                                     const uint8_t *binding_pubkey,
                                      const char *grant_json,
                                      const struct A2gTrustAnchorHandle *trust,
                                      struct A2gVerdictHandle **out_verdict);
@@ -201,12 +209,14 @@ const char *a2g_verdict_binding_id(const struct A2gVerdictHandle *handle);
 // `handle` must be valid and non-freed.
 const char *a2g_verdict_request_hash(const struct A2gVerdictHandle *handle);
 
-// Returns the Phase 1 MAC-protected binding JSON when `a2g_verdict_decision` is
-// `A2G_DECISION_PENDING_APPROVAL`; otherwise empty string.
+// Returns the Phase 1 **unsigned** `PendingApprovalBinding` JSON when
+// `a2g_verdict_decision` is `A2G_DECISION_PENDING_APPROVAL`; otherwise empty string.
 //
-// Pass this value **unmodified** as `binding_json` to `a2g_decide_with_approval`.
-// Any modification to the returned string will cause Phase 2 to return
-// `A2G_DECISION_ERROR` (MAC mismatch). The pointer is valid until `a2g_verdict_free`.
+// Present this value to the Enforcing Gateway's SignBinding operation. The
+// gateway validates, signs with its binding key, queues the entry, and returns
+// the signed blob — pass *that* blob (not this one) as `signed_binding_json`
+// to `a2g_decide_with_approval` (ADR-0015). The pointer is valid until
+// `a2g_verdict_free`.
 //
 // # Safety
 // `handle` must be valid and non-freed.

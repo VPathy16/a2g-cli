@@ -34,9 +34,10 @@
  * synchronisation.  The handle itself is not internally synchronized — it is a
  * plain heap allocation that the caller owns exclusively.
  *
- * The per-process binding-integrity key (used to MAC Phase 1 pending-approval
- * bindings) is initialized once via a thread-safe OnceLock and is read-only
- * thereafter.  No additional synchronisation is required from the caller.
+ * This library holds NO binding-signing key (ADR-0015): Phase 1 bindings are
+ * returned unsigned and are signed by the Enforcing Gateway.  Phase 2 verifies
+ * the gateway-signed blob against the caller-supplied binding verifying key.
+ * There is no process-global mutable key state.
  *
  *
  * OWNERSHIP MODEL
@@ -77,22 +78,28 @@
  *                                       tampered binding MAC.  Abort.
  *
  *
- * PHASE 1 → PHASE 2 SUMMARY
+ * PHASE 1 → PHASE 2 SUMMARY (ADR-0015: gateway binding-key custody)
  * --------------------------
  * When a2g_decide() returns A2G_DECISION_PENDING_APPROVAL:
  *
- *   1. Extract the MAC-protected binding token:
+ *   1. Extract the UNSIGNED binding token:
  *        const char *binding = a2g_verdict_binding_json(h);
+ *      and present it to the Enforcing Gateway's SignBinding operation.
+ *      The gateway validates, signs, queues, and returns the signed blob.
  *
  *   2. Forward binding_id + request_hash + escalate_to (from the binding JSON)
  *      to your approval backend (operator console, mobile push, etc.).
  *
  *   3. When the human approver returns a signed ApprovalGrant JSON, call:
  *        a2g_decide_with_approval(cbor, cbor_len, tool, params, state,
- *                                 binding, grant_json, trust, &out_verdict);
+ *                                 signed_binding, gw_binding_pubkey,
+ *                                 grant_json, trust, &out_verdict);
+ *      where gw_binding_pubkey is the gateway's 32-byte binding VERIFYING key
+ *      (NULL returns A2G_DECISION_ERROR — fail-explicit).
  *
- *   Do NOT modify any field of binding_json between steps 1 and 3.  The MAC
- *   covers every field; any modification returns A2G_DECISION_ERROR.
+ *   Do NOT modify any field of the signed blob between steps 1 and 3.  The
+ *   gateway signature covers every field; any modification returns
+ *   A2G_DECISION_ERROR.
  *
  * See docs/INTEGRATION.md for the full integration sequence and architecture.
  */

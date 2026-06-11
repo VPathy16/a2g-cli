@@ -828,3 +828,135 @@ fn test_vcan_real_frame_and_no_frame_on_refused() {
         "forbidden tool must be refused on real vcan (no bus write); got: {refused:?}"
     );
 }
+
+// ── ADR-0015: binding-key custody — forge attempt ─────────────────────────────
+
+/// The rich domain cannot produce a binding the gateway accepts without the
+/// gateway having signed (and queued) it. A locally signed binding with a
+/// binding_id the gateway never saw must be refused at step 7 — the gateway's
+/// queue, populated only by its own SignBinding operation, is the source of
+/// truth (SPEC §9.7; ADR-0015).
+#[test]
+fn test_forged_binding_rejected_by_gateway() {
+    let gw = GatewayHandle::start();
+    let mandate = sensitive_escalate_mandate();
+    let params: serde_json::Value = serde_json::json!({});
+
+    // Phase 1 → PendingApproval with an unsigned binding.
+    let v1 = decide(
+        &mandate,
+        "WINDOW_POS",
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        Some(&parked_state()),
+        &TrustAnchor::SelfSovereign,
+    )
+    .unwrap();
+    let binding = v1.pending_approval.as_ref().unwrap().clone();
+
+    // FORGE: the rich domain signs the binding with its OWN key instead of
+    // presenting it to the gateway. It never enters the gateway's queue.
+    let rogue_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let forged =
+        a2g_core::hitl::SignedBinding::sign(&binding, &rogue_key).expect("forge must encode");
+    let _forged_json = serde_json::to_string(&forged).unwrap();
+
+    // Operator grant is valid — but the binding was never queued by the gateway.
+    let op_key = gw.demo_keys.operator_signing_key();
+    let operator_did = format!(
+        "did:a2g:{}",
+        bs58::encode(op_key.verifying_key().to_bytes()).into_string()
+    );
+    let grant = ApprovalGrant::new_signed(
+        &binding.binding_id,
+        &binding.request_hash,
+        &operator_did,
+        &op_key,
+        300,
+        Utc::now(),
+        &v1.verdict_id,
+    )
+    .unwrap();
+
+    // Even submitting the grant fails: no pending binding with this id exists.
+    let grant_resp = gw.send(&GatewayRequest::SubmitGrant {
+        grant_json: serde_json::to_string(&grant).unwrap(),
+    });
+    assert!(
+        matches!(&grant_resp, GatewayResponse::Refused { .. }),
+        "grant for a never-queued binding must be refused; got: {grant_resp:?}"
+    );
+
+    // Phase 2 enforcement with the forged binding_id must be refused at step 7.
+    let v2 = decide_with_approval(
+        &mandate,
+        "WINDOW_POS",
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        Some(&parked_state()),
+        &binding,
+        &grant,
+        &TrustAnchor::SelfSovereign,
+    )
+    .unwrap();
+    let resp = enforce_with_binding(&gw, &v2, "{}", &binding.binding_id);
+    assert!(
+        matches!(&resp, GatewayResponse::Refused { .. }),
+        "forged binding (never gateway-signed/queued) must be refused; got: {resp:?}"
+    );
+}
+
+/// The signed blob returned by the gateway verifies against the gateway's
+/// binding verifying key (published via GetPublicKeys) — and against nothing else.
+#[test]
+fn test_gateway_signed_binding_verifies_with_published_key() {
+    let gw = GatewayHandle::start();
+    let mandate = sensitive_escalate_mandate();
+    let params: serde_json::Value = serde_json::json!({});
+
+    let v1 = decide(
+        &mandate,
+        "WINDOW_POS",
+        &params,
+        &NoopLedger,
+        Utc::now(),
+        Some(&parked_state()),
+        &TrustAnchor::SelfSovereign,
+    )
+    .unwrap();
+    let binding = v1.pending_approval.as_ref().unwrap().clone();
+
+    let sign_resp = gw.send(&GatewayRequest::SignBinding {
+        binding_json: serde_json::to_string(&binding).unwrap(),
+    });
+    let signed_json = match sign_resp {
+        GatewayResponse::SignedBinding { signed_json } => signed_json,
+        other => panic!("expected SignedBinding; got {other:?}"),
+    };
+
+    // Fetch the published binding verifying key.
+    let keys_resp = gw.send(&GatewayRequest::GetPublicKeys);
+    let binding_vk_hex = match keys_resp {
+        GatewayResponse::PublicKeys {
+            binding_verifying_key_hex,
+            ..
+        } => binding_verifying_key_hex,
+        other => panic!("expected PublicKeys; got {other:?}"),
+    };
+    let vk_bytes: [u8; 32] = hex::decode(&binding_vk_hex).unwrap().try_into().unwrap();
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&vk_bytes).unwrap();
+
+    // Verifies with the gateway's key…
+    let extracted = a2g_core::hitl::SignedBinding::verify_json(&signed_json, &vk)
+        .expect("gateway-signed binding must verify with the published key");
+    assert_eq!(extracted.binding_id, binding.binding_id);
+
+    // …and with no other key.
+    let other = SigningKey::generate(&mut rand::rngs::OsRng).verifying_key();
+    assert!(
+        a2g_core::hitl::SignedBinding::verify_json(&signed_json, &other).is_err(),
+        "binding must NOT verify with a non-gateway key"
+    );
+}

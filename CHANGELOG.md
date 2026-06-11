@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Breaking
 
+- **Binding-signing key moved out of the rich domain into the gateway (ADR-0015)**
+  — closes SPEC Appendix A.1 (circular trust assumption). One binding signer in
+  the system: `a2g-gateway`.
+  - The ephemeral `OnceLock<SigningKey>` is **removed** from `a2g-ffi`. The rich
+    domain holds only the gateway's binding *verifying* key.
+  - `a2g_decide()` Phase 1 now returns the **unsigned** `PendingApprovalBinding`
+    JSON; the host must present it to the gateway's `SignBinding` operation.
+  - `a2g_decide_with_approval()` gains a mandatory
+    `const uint8_t *binding_pubkey` (32-byte gateway binding verifying key) and
+    its `binding_json` parameter is renamed `signed_binding_json` (the
+    gateway-signed blob). NULL `binding_pubkey` → `A2G_DECISION_ERROR`
+    (fail-explicit, no in-process fallback key).
+  - New shared wire type `a2g_core::hitl::SignedBinding` (sign/verify of the
+    canonical CBOR `BindingPayload`); the private duplicates in `a2g-ffi` and
+    `a2g-gateway` are gone.
+  - `DemoKeys` / `GetPublicKeys` gain `binding_verifying_key_hex`.
+  - `a2g-gateway --production` now requires `--keystore <path>`; it refuses to
+    start without a properly provisioned keystore (SPEC §10.1 Level 3). Dev mode
+    still generates ephemeral keys with a loud warning.
+
 - **Issuer trust enforcement added to the decision pipeline (ADR-0014)**
   — `decide()`, `enforce()`, and `decide_with_approval()` in `a2g-core` gain a
   mandatory `trust: &TrustAnchor<'_>` parameter. The FFI ABI gains
