@@ -149,3 +149,28 @@ through a push notification.  Therefore export is denied at the structural level
 3. **pay.* rate limiting**: Payment tools currently use the mandate-level
    `max_calls_per_minute` rate limit.  A per-session or per-day payment cap
    may be desirable; deferred to a future ADR.
+
+4. **Actor-aware comms HITL** *(recorded deviation)*: The task specification
+   called for actor-aware gating on `comms.call.place` / `comms.sms.send` —
+   agent-initiated invocations would require HITL; driver-initiated (voice
+   command) would not.  The implementation chose **always-HITL regardless of
+   initiator** (fail-closed direction).  This is acceptable from a security
+   posture but creates an HMI safety issue: a driver saying "call my wife"
+   receives an approval-prompt interruption while driving, which is itself a
+   distraction finding.  A future ADR should introduce an `actor` field in
+   attested state and gate `CommsSensitiveHitl` tools on
+   `actor == AgentInitiated` before requiring HITL.  Filed as follow-up:
+   "actor-aware comms HITL".
+
+5. **pii-gated reads trust model residual risk**: `comms.contacts.read` and
+   `pii.*.read` tools are enforced by `decide_core()` in the rich domain.
+   The gateway does **not** have an independent binding guard for these tools
+   (only `pay.*` and other always-HITL tools have the Step 3.5 binding check).
+   A compromised rich-domain agent that holds the gateway receipt-signing key
+   can issue a validly-signed ALLOW receipt for `comms.contacts.read` without
+   ever calling `decide()` — the gateway will pass it through.  This is
+   consistent with the existing trust model for `Sensitive` tools (the same
+   exposure exists for any Sensitive vehicle tool), but it is a residual risk
+   worth making explicit.  Mitigation path: mandate-presentation-at-enforcement
+   mode (the gateway verifies the mandate independently, not just the receipt
+   signature) — deferred to a future ADR.
