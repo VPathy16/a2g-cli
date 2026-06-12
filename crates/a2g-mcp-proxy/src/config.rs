@@ -9,8 +9,8 @@
 //! - TrustAnchor mode (self-sovereign for now; root key extension forthcoming).
 //! - The tool-name → capability mapping table.
 //!
-//! **Default rule**: any tool NOT in the mapping table is treated as
-//! `pay.unknown` (always-HITL, fail-closed).
+//! **Default rule**: any tool NOT in the mapping table is mapped to the
+//! `unmapped.<tool_name>` capability (fail-closed: not in any mandate, DENY).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -42,8 +42,8 @@ pub struct ProxyConfig {
     /// Values are A2G capability names (e.g. `"vehicle.climate.set_temperature"`,
     /// `"comms.contacts.read"`, `"pay.checkout"`).
     ///
-    /// Any tool NOT in this table is treated as `pay.unknown` (always-HITL,
-    /// fail-closed per ADR-0019).
+    /// Any tool NOT in this table maps to `unmapped.<tool_name>` (not in any
+    /// mandate → DENY, fail-closed per ADR-0020).
     #[serde(default)]
     pub tool_map: HashMap<String, String>,
 }
@@ -86,12 +86,14 @@ impl ProxyConfig {
     /// Resolve the A2G capability for a given MCP tool name.
     ///
     /// Returns the mapped capability name if found; otherwise returns
-    /// `"pay.unknown"` (always-HITL, fail-closed default per ADR-0019).
-    pub fn resolve_capability<'a>(&'a self, tool_name: &str) -> &'a str {
+    /// `"unmapped.<tool_name>"` (not in any mandate → DENY, fail-closed per ADR-0020).
+    /// Using a dedicated namespace keeps the audit trail honest: a file-read tool
+    /// must not appear in signed receipts as a payment capability.
+    pub fn resolve_capability(&self, tool_name: &str) -> String {
         self.tool_map
             .get(tool_name)
-            .map(|s| s.as_str())
-            .unwrap_or("pay.unknown")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("unmapped.{tool_name}"))
     }
 }
 
@@ -103,7 +105,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn test_unmapped_tool_resolves_to_pay_unknown() {
+    fn test_unmapped_tool_resolves_to_unmapped_namespace() {
         let cfg = ProxyConfig {
             downstream: DownstreamConfig {
                 command: "echo-server".to_string(),
@@ -127,8 +129,12 @@ mod tests {
             cfg.resolve_capability("echo"),
             "vehicle.climate.set_temperature"
         );
-        assert_eq!(cfg.resolve_capability("unknown_tool"), "pay.unknown");
-        assert_eq!(cfg.resolve_capability(""), "pay.unknown");
+        assert_eq!(
+            cfg.resolve_capability("unknown_tool"),
+            "unmapped.unknown_tool"
+        );
+        assert_eq!(cfg.resolve_capability("read_file"), "unmapped.read_file");
+        assert_eq!(cfg.resolve_capability(""), "unmapped.");
     }
 
     #[test]
@@ -161,6 +167,6 @@ read = "vehicle.infotainment.media_control"
             cfg.resolve_capability("echo"),
             "vehicle.climate.set_temperature"
         );
-        assert_eq!(cfg.resolve_capability("not_mapped"), "pay.unknown");
+        assert_eq!(cfg.resolve_capability("not_mapped"), "unmapped.not_mapped");
     }
 }

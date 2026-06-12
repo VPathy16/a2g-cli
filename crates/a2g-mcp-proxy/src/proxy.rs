@@ -124,7 +124,7 @@ fn handle_tool_call(
     let params = req.params.as_ref().cloned().unwrap_or(json!({}));
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Map tool name → A2G capability (fail-closed: unmapped → "pay.unknown").
+    // Map tool name → A2G capability (fail-closed: unmapped → "unmapped.<tool>").
     let capability = config.resolve_capability(tool_name);
 
     // Params for decide() — use the tool "arguments" sub-object if present.
@@ -135,7 +135,7 @@ fn handle_tool_call(
 
     // ── A2G governance check ───────────────────────────────────────────────
     let outcome = gov.check(
-        capability,
+        &capability,
         &tool_args,
         &tool_args_json,
         Path::new(&config.gateway_socket),

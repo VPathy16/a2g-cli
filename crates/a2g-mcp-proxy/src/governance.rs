@@ -1,6 +1,6 @@
 //! A2G governance bridge for the MCP proxy.
 //!
-//! Implements the three-phase flow per ADR-0019:
+//! Implements the three-phase flow per ADR-0020:
 //!
 //! 1. `decide()` — pure decision against the loaded mandate.
 //! 2. Gateway `Enforce` — present the signed receipt; only on accept do we proceed.
@@ -98,7 +98,7 @@ impl GovernanceContext {
 
     /// Run the full A2G governance check for a tool call.
     ///
-    /// Flow (ADR-0019 §Decision):
+    /// Flow (ADR-0020 §Decision):
     ///   1. `decide()` — pure, no I/O.
     ///   2. On ALLOW: sign receipt → gateway Enforce.
     ///   3. On PENDING_APPROVAL: sign binding → gateway SignBinding; return Escalate.

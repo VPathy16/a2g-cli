@@ -5,7 +5,7 @@
 //!
 //! - `StdioTransport` — spawns a subprocess and communicates via stdin/stdout.
 //!   This is the production implementation.
-//! - `HttpSseTransport` — **not implemented** (ADR-0019 §Not changed).  The
+//! - `HttpSseTransport` — **not implemented** (ADR-0020 §Not changed).  The
 //!   seam exists so a future implementation can be dropped in without changing
 //!   the proxy dispatch loop.
 
@@ -76,7 +76,7 @@ impl DownstreamTransport for StdioTransport {
 
 // ── HTTP/SSE transport (unimplemented seam) ───────────────────────────────────
 
-/// HTTP/SSE transport — not implemented (ADR-0019 §Not changed).
+/// HTTP/SSE transport — not implemented (ADR-0020 §Not changed).
 ///
 /// This struct exists as a compile-time seam so that an HTTP/SSE implementation
 /// can be added later without changing the proxy dispatch loop.  Any attempt to
@@ -89,7 +89,7 @@ impl HttpSseTransport {
     #[allow(dead_code)]
     pub fn new(_url: &str) -> Self {
         unimplemented!(
-            "HTTP/SSE transport is not implemented (ADR-0019 §Not changed); \
+            "HTTP/SSE transport is not implemented (ADR-0020 §Not changed); \
              use StdioTransport for the current release"
         )
     }

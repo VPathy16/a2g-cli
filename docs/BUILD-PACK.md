@@ -3,14 +3,19 @@
 Repo-resident edition. Commit this file as `docs/BUILD-PACK.md`.
 
 **Status at time of writing:** `main` carries v0.2.0 (frozen protocol) + S1
-(cockpit domains, ADR-0018). S2 (MCP proxy) and S5 (QNX build) are launched
-in parallel sessions. Remaining tasks in this pack: S3, S4, S6, S7.
+(cockpit domains, ADR-0018). S2 (MCP proxy, ADR-0020) and S5 (QNX build, ADR-0019)
+merged. Remaining tasks in this pack: S3, S4, S6, S7.
 
 ## Operating model (proven over PR #29/#30)
 
 - **One task per Claude Code session, one PR per task, base branch `main`.**
 - The session prompt is one line:
   `Read docs/BUILD-PACK.md. Execute task S<N> only, with the standing preamble. Do not stop until every acceptance criterion passes. Open one PR against main. Do not start any other task.`
+- **Parallel sessions get ADR numbers pre-assigned in the prompt.** When two
+  sessions run concurrently (e.g. S2 + S5), pick the next two free numbers from
+  `docs/adr/` before launching and hard-code them: `Your ADR number is ADR-00XX.
+  Do not pick a different number.` Different filenames means git will not detect
+  the collision — the index silently ends up with two ADR-00XX entries.
 - The human review gate between sessions is non-negotiable. Review asymmetry:
   line-by-line for anything touching `decide()`, the classifiers, the FFI,
   or gateway verification (S3); skim-level for docs and packaging (S6, S7).

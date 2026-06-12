@@ -1,10 +1,10 @@
-# ADR-0019 — A2G MCP Proxy: Model Context Protocol Governance Wrapper
+# ADR-0020 — A2G MCP Proxy: Model Context Protocol Governance Wrapper
 
 **Status:** Accepted  
 **Date:** 2026-06-12  
 **Replaces:** —  
 **Related:** ADR-0010 (enforcing gateway), ADR-0012 (A2gError), ADR-0014 (issuer trust),
-ADR-0015 (binding key custody), ADR-0018 (cockpit domains), SPEC §1.3
+ADR-0015 (binding key custody), ADR-0018 (cockpit domains), ADR-0019 (QNX portability), SPEC §1.3
 
 ---
 
@@ -65,7 +65,8 @@ A standalone Rust binary that:
 
 4. For every `tools/call`:
    a. Map tool name → A2G capability via config table.
-      Unmapped → treat as `pay.unknown` (always-HITL, Sensitive).
+      Unmapped → synthetic capability `unmapped.<tool_name>` (not in any mandate → DENY,
+      fail-closed; audit trail records the real tool name, not a payment namespace).
    b. Call `a2g_core::enforce::decide()` with the mandate + TrustAnchor.
    c. On **DENY / EXPIRED**: return MCP error `{"code": -32001, ...}` with
       machine reason code and human-readable text.  Downstream never called.
@@ -106,7 +107,7 @@ mandate file path is configured in TOML; the proxy reads and caches it.
 
 | Condition | Action |
 |-----------|--------|
-| Tool unmapped | Treated as `pay.unknown` → always-HITL |
+| Tool unmapped | Capability becomes `unmapped.<tool_name>` → not in mandate → DENY (`tool_not_authorized`); truthful in audit trail |
 | `decide()` returns `Err` | DENY with `internal_error` code |
 | Gateway connection fails | MCP error `gateway_unreachable` |
 | Gateway returns `Refused` | MCP error `gateway_refused` |

@@ -349,25 +349,26 @@ fn test_denied_call_produces_zero_downstream_calls() {
     );
 }
 
-/// (c) Unmapped tool — not forwarded (fail-closed → pay.unknown → ESCALATE).
+/// (c) Unmapped tool — not forwarded (fail-closed → unmapped.<tool> → DENY).
+///
+/// `unmapped.*` is a non-cockpit capability that won't appear in any mandate;
+/// `decide()` returns DENY (tool_not_authorized).  The audit trail records the
+/// real tool name, not a payment namespace.
 #[test]
 fn test_unmapped_tool_is_not_forwarded() {
     let tool_map = HashMap::new(); // empty — no mappings
-
-    // Mandate grants pay.unknown which is always-HITL regardless; but mandate
-    // does not contain "pay.unknown" anyway.
     let harness = TestHarness::new(tool_map, &["vehicle.climate.set_temperature"]);
 
     let (response, call_count) = harness.run_tool_call("some_unmapped_tool", json!({}), vec![]);
 
-    // Should be an error — either ESCALATE (pay.unknown HITL) or DENY (not in mandate).
+    // unmapped.some_unmapped_tool is not in the mandate → DENY (tool_not_authorized).
     let error = response
         .get("error")
         .expect("expected error for unmapped tool");
     let code = error["code"].as_i64().unwrap();
-    assert!(
-        code == ERR_A2G_ESCALATE || code == ERR_A2G_DENIED,
-        "expected ESCALATE or DENY for unmapped tool, got code={code}: {error}"
+    assert_eq!(
+        code, ERR_A2G_DENIED,
+        "expected DENY for unmapped tool, got code={code}: {error}"
     );
 
     // Downstream MUST NOT have been called.
