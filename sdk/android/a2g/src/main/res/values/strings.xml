@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    A2G SDK verdict reason code → user-facing string map.
+
+    OEM LOCALISATION CONTRACT (ADR-0021 §4):
+    =========================================
+    Each string corresponds exactly to one ReasonCode enum value in
+    ai.vanaras.a2g.ReasonCode. The name format is:
+
+        a2g_reason_<REASON_CODE_LOWER_CASE>
+
+    To localise for your market:
+    1. Copy this file to res/values-<locale>/strings.xml (e.g. values-de/).
+    2. Translate each string. The resource name MUST remain unchanged.
+    3. The <reasonCode> key in Verdict.Deny matches the ReasonCode enum name.
+
+    Usage in app code:
+        val textResId = reasonCodeToStringRes(verdict.reasonCode)
+        assistantSpeech(getString(textResId))
+
+    These strings are suitable for assistant speech (text-to-speech) and
+    status UI. They are intentionally non-technical for end users.
+    Developer-facing detail is in Verdict.Deny.humanText.
+-->
+<resources>
+    <!-- App name (not used at runtime — present for Gradle library module compliance) -->
+    <string name="app_name">A2G SDK</string>
+
+    <!--
+        REASON CODE STRINGS
+        One string per ReasonCode enum value. Keep in sync with ReasonCode.kt.
+        The ReasonCodeSyncTest.kt ensures no enum value is added without a
+        corresponding policy_rule mapping; this file should match that enum.
+    -->
+
+    <!-- ReasonCode.MANDATE_INVALID -->
+    <string name="a2g_reason_mandate_invalid">
+        This action cannot be authorized because the permission document is invalid.
+        Please contact support to refresh your authorization.
+    </string>
+
+    <!-- ReasonCode.MANDATE_TTL_EXCEEDED -->
+    <string name="a2g_reason_mandate_ttl_exceeded">
+        This action cannot be authorized because the permission document has expired.
+        Please renew your authorization and try again.
+    </string>
+
+    <!-- ReasonCode.TOOL_NOT_AUTHORIZED -->
+    <string name="a2g_reason_tool_not_authorized">
+        This action is not permitted by your current authorization level.
+    </string>
+
+    <!-- ReasonCode.BOUNDARY_VIOLATION -->
+    <string name="a2g_reason_boundary_violation">
+        This action was blocked because it would exceed the allowed resource boundaries.
+    </string>
+
+    <!-- ReasonCode.VEHICLE_STATE_VIOLATION -->
+    <string name="a2g_reason_vehicle_state_violation">
+        This action is not permitted while the vehicle is in its current state.
+        Please ensure the vehicle is safely stopped before retrying.
+    </string>
+
+    <!-- ReasonCode.VEHICLE_FORBIDDEN_DOMAIN -->
+    <string name="a2g_reason_vehicle_forbidden_domain">
+        This action involves a safety-critical vehicle system and cannot be
+        performed by an automated assistant under any circumstances.
+    </string>
+
+    <!-- ReasonCode.COCKPIT_FORBIDDEN_DOMAIN -->
+    <string name="a2g_reason_cockpit_forbidden_domain">
+        This action involves protected personal data and cannot be
+        performed automatically. Please use the manual controls.
+    </string>
+
+    <!-- ReasonCode.JURISDICTION_VIOLATION -->
+    <string name="a2g_reason_jurisdiction_violation">
+        This action is not available at the current time or in the current location.
+    </string>
+
+    <!-- ReasonCode.RATE_LIMIT_EXCEEDED -->
+    <string name="a2g_reason_rate_limit_exceeded">
+        Too many requests have been made recently. Please wait a moment and try again.
+    </string>
+
+    <!-- ReasonCode.MANDATE_REVOKED -->
+    <string name="a2g_reason_mandate_revoked">
+        This authorization has been revoked. Please contact your administrator.
+    </string>
+
+    <!-- ReasonCode.ISSUER_UNTRUSTED -->
+    <string name="a2g_reason_issuer_untrusted">
+        The authorization document was issued by an unrecognized authority.
+        Please contact support.
+    </string>
+
+    <!-- ReasonCode.INVALID_REQUEST -->
+    <string name="a2g_reason_invalid_request">
+        The request was not valid. Please check the action parameters and try again.
+    </string>
+
+    <!-- ReasonCode.PII_GRANT_REQUIRED -->
+    <string name="a2g_reason_pii_grant_required">
+        Access to this information requires an additional privacy authorization
+        that is not present in your current permission document.
+    </string>
+
+    <!-- ReasonCode.INTERNAL_ERROR -->
+    <string name="a2g_reason_internal_error">
+        An internal error occurred while checking authorization. Please try again.
+        If the problem persists, contact support.
+    </string>
+
+    <!-- ReasonCode.UNKNOWN -->
+    <string name="a2g_reason_unknown">
+        This action was denied for an unspecified reason. Please contact support.
+    </string>
+
+    <!-- Escalation (not a deny — requires human approval) -->
+    <string name="a2g_escalate_message">
+        This action requires approval from a human operator before it can proceed.
+        A request has been sent.
+    </string>
+</resources>

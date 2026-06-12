@@ -1,0 +1,25 @@
+[versions]
+# Android Gradle Plugin (AGP)
+agp = "8.4.0"
+# Kotlin
+kotlin = "2.0.0"
+# SDK / NDK versions
+compileSdk = "34"
+minSdk = "29"          # Android 10 / AAOS minimum
+targetSdk = "34"
+ndkVersion = "26.3.11579264"   # NDK 26 LTS — used by cargo-ndk
+
+# Test dependencies
+junit = "4.13.2"
+
+[libraries]
+# Android / AAOS
+android-car = { group = "androidx.car.app", name = "app", version = "1.4.0" }
+
+# Test
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

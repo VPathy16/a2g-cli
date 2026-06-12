@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Demo activity layout for the A2G AAOS governance demonstration.
+
+    Four buttons:
+    1. Climate (ALLOW path)          — Comfort tier
+    2. Window at speed (DENY path)   — Sensitive tier
+    3. Cruise control (REFUSED path) — Forbidden tier
+    4. Send SMS (ESCALATE path)      — Cockpit always-HITL
+
+    The status TextView shows the verdict badge color:
+      GREEN      = ALLOW
+      RED        = DENY
+      DARK RED   = STRUCTURALLY REFUSED (Forbidden domain)
+      AMBER      = ESCALATE (human approval required)
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp"
+    android:gravity="center_horizontal">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="A2G Governance Demo"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Each button demonstrates a different verdict path"
+        android:textSize="14sp"
+        android:layout_marginBottom="24dp" />
+
+    <!-- Status / verdict badge -->
+    <TextView
+        android:id="@+id/status_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:minHeight="100dp"
+        android:padding="16dp"
+        android:text="Tap a button to run a governed action"
+        android:textSize="15sp"
+        android:textColor="#FFFFFF"
+        android:gravity="center"
+        android:layout_marginBottom="24dp"
+        android:background="#FF9E9E9E" />
+
+    <!-- Button 1: Climate — Comfort, expect ALLOW -->
+    <Button
+        android:id="@+id/btn_climate"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:text="Climate: Set Temperature 22°C\n(Comfort → ALLOW)"
+        android:backgroundTint="#FF4CAF50" />
+
+    <!-- Button 2: Window — Sensitive, expect DENY at speed -->
+    <Button
+        android:id="@+id/btn_window"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:text="Window: Open 50%\n(Sensitive → DENY if moving)"
+        android:backgroundTint="#FFF44336" />
+
+    <!-- Button 3: Cruise — Forbidden, always REFUSED -->
+    <Button
+        android:id="@+id/btn_cruise"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:text="Cruise Control\n(Forbidden → STRUCTURALLY REFUSED)"
+        android:backgroundTint="#FFB71C1C" />
+
+    <!-- Button 4: SMS — Cockpit always-HITL, expect ESCALATE -->
+    <Button
+        android:id="@+id/btn_sms"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="24dp"
+        android:text="Send SMS\n(Cockpit always-HITL → ESCALATE)"
+        android:backgroundTint="#FFFFC107" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="12sp"
+        android:textColor="#FF757575"
+        android:text="Gateway socket: /tmp/a2g_demo.sock\nSee sdk/android/README.md for setup"
+        android:gravity="center" />
+
+</LinearLayout>

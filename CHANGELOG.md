@@ -26,6 +26,41 @@ surfaces will require a v0.3.0 (semver minor + changelog entry):
 
 ## [Unreleased]
 
+### Added (S3 — Kotlin Android SDK)
+
+- **New `sdk/android/` Gradle multi-project (ADR-0021)** — Kotlin library
+  wrapping `a2g-ffi` for AAOS app developers, plus a `GovernedCarClient` sample:
+  - `A2g.init(mandateCbor, trustAnchor)` / `A2g.decide(tool, paramsJson)` /
+    `A2g.decideWithApproval(…)` — idiomatic Kotlin API, no leaked C types.
+  - `Verdict` sealed class: `Allow(receipt, verdictId)` / `Deny(reasonCode,
+    humanText, verdictId)` / `Escalate(unsignedBindingJson, bindingId, requestHash)`.
+  - `ReasonCode` enum mirroring all a2g-core policy_rule prefixes; `ReasonCodeSyncTest`
+    asserts they cannot drift out of sync.
+  - `GatewayClient` over the CBOR-framed Unix socket (`[u32 BE length][ciborium body]`,
+    64 KiB max), behind `GatewayTransport` interface (vsock extension point).
+  - `UnixSocketTransport` — Android `LocalSocket`-backed implementation.
+  - `GovernedCarClient` — wraps `CarPropertyManager` so `setHvacTemperature()`,
+    `setWindowPosition()`, `sendSms()` etc. all run `decide()` + `enforce()` before
+    touching the vehicle bus.
+  - `DemoActivity` with four buttons showing ALLOW / DENY / STRUCTURALLY REFUSED /
+    ESCALATE verdict badges.
+  - `res/values/strings.xml` with `ReasonCode → user-facing string` contract for
+    OEM localisation; documented in `sdk/android/README.md`.
+  - Host-JVM unit tests using `MockJniBridge` (no device, no native library):
+    - All vehicle Forbidden domain tools → DENY.
+    - `pii.profile.export` → DENY (cockpit Forbidden, ADR-0018).
+    - `pii.grant` → `PiiGrantReservedNameException` (SPEC §3.6.3 reserved sentinel).
+    - `comms.sms.send`, `pay.*` → ESCALATE (always-HITL, ADR-0018).
+    - Wrong-length `bindingPubkey` → `A2gNullPubkeyException` (ADR-0015
+      fail-explicit behavior; mock NEVER silently defaults to ALLOW).
+  - `ReasonCodeSyncTest` — fails if any a2g-core policy_rule prefix is not mapped.
+  - `sdk/android/README.md` — quickstart from clone to first DENY in < 30 min.
+  - CI job `android-sdk` in `.github/workflows/ci.yml` — installs NDK + cargo-ndk,
+    cross-builds `liba2g_ffi.so` for arm64-v8a + x86_64, assembles both modules,
+    runs host-JVM tests. `continue-on-error: true` (NDK toolchain availability).
+  - No Rust crate changes. The ABI is frozen (ADR-0009); the SDK wraps existing
+    `a2g_decide` / `a2g_decide_with_approval` / `a2g_trust_anchor_*` symbols.
+
 ### Added (S5 — QNX 8.0 Build Portability)
 
 - **QNX 8.0 portability for a2g-gateway and a2g-core (ADR-0019)** —
