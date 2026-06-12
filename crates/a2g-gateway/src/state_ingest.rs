@@ -408,7 +408,55 @@ fn reader_loop(
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// QNX (NTO) CAN reader skeleton.
+///
+/// QNX Neutrino uses character-device CAN drivers (`dev-can-*`, e.g.
+/// `dev-can-mx6x`, `dev-can-kvaser`) that expose either a BSD-socket-compatible
+/// `socket(AF_CAN, SOCK_RAW, CAN_RAW)` interface (via the optional QNX CAN
+/// Socket library, `-lcanctl`) or a `devctl()`-based ioctl path.
+///
+/// ## Integration path (real hardware)
+///
+/// 1. Add `dev-can-*` driver startup to the QNX image build script (`bsp.build`).
+/// 2. At runtime, open the CAN channel:
+///    ```
+///    // QNX SDP 8.0 with CAN Socket library
+///    let fd = libc::socket(AF_CAN, SOCK_RAW, CAN_RAW);   // requires -lcanctl
+///    // bind to /dev/can0 or the appropriate devctl channel
+///    ```
+/// 3. Replace the `unimplemented!` body below with the real read loop, using
+///    the same `ingest_speed_frame` / `ingest_gear_frame` calls already in the
+///    Linux path above.
+///
+/// Until this is implemented, the reader exits immediately, `reader_active`
+/// stays `true` (set by `spawn_reader` before the thread is spawned), and
+/// every Sensitive enforcement is refused fail-closed — identical semantics to
+/// the generic non-Linux stub below.
+///
+/// This function is reachable on `target_os = "nto"` but intentionally returns
+/// `Err` so that integration gaps are surfaced at runtime.
+#[cfg(target_os = "nto")]
+fn reader_loop(
+    _ingest: &StateIngest,
+    iface: &str,
+    _speed_can_id: u32,
+    _gear_can_id: u32,
+    _stop: &AtomicBool,
+) {
+    // TODO(qnx): implement dev-can-* driver integration.
+    // See ADR-0019 §3 and docs/qnx-integration.md §CAN Driver Integration.
+    eprintln!(
+        "[gateway:ingest] QNX CAN driver: real dev-can-* integration required for {iface}; \
+         state stays fail-safe (fail-closed)"
+    );
+}
+
+/// Fallback for any OS that is neither Linux nor QNX NTO.
+///
+/// SocketCAN is Linux-specific; there is no generic POSIX CAN interface.
+/// The reader exits immediately so ingested state stays permanently stale and
+/// fail-closed (when `--state-ingest` is active).
+#[cfg(not(any(target_os = "linux", target_os = "nto")))]
 fn reader_loop(
     _ingest: &StateIngest,
     iface: &str,

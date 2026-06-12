@@ -26,6 +26,31 @@ surfaces will require a v0.3.0 (semver minor + changelog entry):
 
 ## [Unreleased]
 
+### Added (S5 — QNX 8.0 Build Portability)
+
+- **QNX 8.0 portability for a2g-gateway and a2g-core (ADR-0019)** —
+  Both crates compile cleanly for `aarch64-unknown-nto-qnx800` with zero Linux
+  regression:
+  - SocketCAN isolated behind `#[cfg(target_os = "linux")]` (already the case
+    in `bus.rs`; state_ingest.rs stub refined).
+  - QNX-specific CAN driver skeleton added (`#[cfg(target_os = "nto")]`
+    `reader_loop` stub) with full doc-comments on the `dev-can-*` integration
+    path. Fails at runtime with an explicit error, preserving fail-closed
+    `reader_active` semantics.
+  - Fallback `reader_loop` for any remaining non-Linux/non-NTO targets kept as
+    the third arm.
+  - Unix socket transport: `std::os::unix::net` is available on QNX (`cfg(unix)`
+    is true); no cfg-gating required.
+  - `docs/qnx-integration.md`: toolchain setup, compile status table, what is
+    stubbed and why, CAN driver integration paths, hypervisor vsock attachment
+    notes, honest untested-items table.
+  - CI: `qnx-check` job added to `.github/workflows/ci.yml` using
+    `cargo +nightly check` for `aarch64-unknown-nto-qnx800`. Job uses
+    `continue-on-error: true` to handle Tier 3 target unavailability without
+    blocking Linux CI; never fakes a green badge.
+  - Protocol freeze: no signed payload changes, no verdict semantic changes,
+    no new a2g-core dependencies.
+
 ### Added (S1 — Cockpit Domains)
 
 - **Cockpit domain extension — comms.\*, pay.\*, pii.\* (ADR-0018 / SPEC §3.6)** —
