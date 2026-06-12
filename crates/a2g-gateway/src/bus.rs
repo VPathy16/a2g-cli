@@ -8,6 +8,14 @@
 //! An enforced ALLOW always calls `write_enforcement_frame`.
 //! A refused action never calls it — the absence of a frame is as meaningful
 //! as its presence.
+//!
+//! ## Platform portability (ADR-0019)
+//!
+//! All SocketCAN code is gated `#[cfg(target_os = "linux")]`. On QNX NTO
+//! (`target_os = "nto"`) and other non-Linux targets, `CanReader::open()`
+//! always returns `Err` and `write_enforcement_frame` falls back to the
+//! simulated bus. See `state_ingest.rs` for the QNX CAN driver skeleton and
+//! `docs/qnx-integration.md` for integration notes.
 
 use sha2::{Digest, Sha256};
 
