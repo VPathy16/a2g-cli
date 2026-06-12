@@ -2,7 +2,7 @@
   "id": "po-007",
   "spec_ref": "§5.10",
   "category": "pipeline-ordering",
-  "description": "Request outside operating hours fails at step 5 (clock shifted -12h; deterministic: adjusted time ~12h from real UTC, outside 12:00-12:01 window)",
+  "description": "Request outside operating hours fails at step 5 (now_ms pins 2026-01-15T22:00:00Z; outside 09:00-17:00 window; deterministic at any wall-clock hour)",
   "known_failing": false,
   "known_failing_reason": null,
   "input": {
@@ -12,7 +12,7 @@
     "mandate_bad_signature": false,
     "mandate_use_spec_signing": false,
     "mandate_workspace_root": null,
-    "mandate_operating_hours": "12:00-12:01",
+    "mandate_operating_hours": "09:00-17:00",
     "mandate_rate_limit": 120,
     "mandate_fs_deny": [],
     "mandate_fs_read": [],
@@ -23,7 +23,8 @@
     "state_gear": null,
     "state_actor": null,
     "state_trust": null,
-    "clock_offset_seconds": -43200,
+    "clock_offset_seconds": 0,
+    "now_ms": 1768514400000,
     "phase2_grant_type": null,
     "gateway_test_type": null
   },

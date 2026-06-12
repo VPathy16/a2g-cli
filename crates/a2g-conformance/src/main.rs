@@ -18,7 +18,7 @@ use a2g_gateway::client::{send_request, sign_receipt_with_params};
 use a2g_gateway::keys::generate;
 use a2g_gateway::protocol::{GatewayReceipt, GatewayRequest, GatewayResponse};
 use a2g_gateway::server::{serve, GatewayState};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signer, SigningKey};
 use rand::RngCore;
 use serde::Deserialize;
@@ -71,6 +71,11 @@ struct VectorInput {
     state_trust: Option<String>,
     #[serde(default)]
     clock_offset_seconds: i64,
+    /// Absolute evaluation timestamp as Unix milliseconds.
+    /// When present, used directly as `now` — overrides `clock_offset_seconds`.
+    /// Required for deterministic operating-hours vectors; the offset form
+    /// is nondeterministic because it shifts wall clock, not a fixed instant.
+    now_ms: Option<i64>,
     phase2_grant_type: Option<String>,
     gateway_test_type: Option<String>,
     trust_mode: Option<String>,
@@ -337,7 +342,15 @@ fn run_vector_inner(v: &TestVector) -> Outcome {
     let vehicle_state = build_vehicle_state(input);
 
     // ── Clock ──────────────────────────────────────────────────────────────────
-    let now = Utc::now() + Duration::seconds(input.clock_offset_seconds);
+    // Prefer the absolute `now_ms` pin when present (deterministic).
+    // Fall back to the relative offset for backward-compatibility with vectors
+    // that only need relative time shifts (e.g. TTL expiry tests).
+    let now = if let Some(ms) = input.now_ms {
+        DateTime::from_timestamp_millis(ms)
+            .expect("vector now_ms is not a valid UTC millisecond timestamp")
+    } else {
+        Utc::now() + Duration::seconds(input.clock_offset_seconds)
+    };
 
     // ── Gateway test path ──────────────────────────────────────────────────────
     if let Some(gw_test) = &input.gateway_test_type {
