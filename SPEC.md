@@ -320,6 +320,15 @@ DENIED unless `"pii.grant"` is present in the mandate.
 This mechanism is protocol-freeze-compliant: it uses the existing `tools` field
 (§4.2) without adding new signed fields to the mandate format.
 
+> **Reserved name**: `"pii.grant"` is a **reserved capability name** and MUST
+> NOT be used as a callable tool identifier.  An agent that attempts to invoke
+> `pii.grant` as a tool MUST receive DENY at Step 3 (tool_not_authorized)
+> unless it happens to appear in the mandate's `tools` list as a sentinel — in
+> which case Step 3 would pass, but the enforcement engine MUST NOT dispatch the
+> string as an executable action.  Mandate issuers MUST NOT include `"pii.grant"`
+> in `escalate_tools`, and enforcement implementations MUST document that the
+> sentinel produces no side-effectful dispatch.
+
 #### 3.6.4 Always-HITL Invariant
 
 A tool classified as always-HITL MUST produce a `PendingApproval` verdict on

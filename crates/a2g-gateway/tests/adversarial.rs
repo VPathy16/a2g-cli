@@ -21,6 +21,7 @@
 //! | 12| `pay_hitl_bypass`             | Step 3.5 — pay.* ALLOW without binding (ADR-0018) |
 //! | 13| `pii_export_forbidden_bypass` | Step 1.5 — pii.profile.export cockpit forbidden (ADR-0018) |
 //! | 14| `pii_grant_forgery`           | Step 3.5 — comms.contacts.read ALLOW without pii.grant binding |
+//! | 15| `pay_fake_binding_id`         | Step 7 — pay.* ALLOW with non-empty but unknown binding_id |
 
 use a2g_core::enforce::{decide, Decision, TrustAnchor};
 use a2g_core::ledger::NoopLedger;
@@ -798,5 +799,57 @@ fn attack_14_pii_grant_forgery_wrong_key() {
         matches!(&resp, GatewayResponse::Refused { reason }
             if reason.contains("signature")),
         "forged pii-read receipt must be refused at Step 2 (wrong key); got: {resp:?}"
+    );
+}
+
+// ── Attack 15: pay.* ALLOW receipt with non-empty but unknown binding_id ─────
+
+/// Step 3.5 checks that `binding_id` is non-empty for always-HITL tools.
+/// Attack 12 covered the empty case.  This attack covers the non-empty-but-fake
+/// case: an attacker supplies a random UUID as `binding_id` — it passes Step 3.5
+/// (non-empty check) but Step 7 finds no pending binding with that id and refuses.
+///
+/// This verifies that a garbage `binding_id` string does NOT satisfy the full
+/// binding-validation check: both steps are load-bearing.
+#[test]
+fn attack_15_pay_fake_binding_id() {
+    let adv = Adv::start();
+
+    let issued_at_ms = Utc::now().timestamp_millis();
+    let mut nonce = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let nonce_hex = hex::encode(nonce);
+    // Non-empty but completely fabricated binding_id — not in the pending queue.
+    let fake_binding_id = uuid::Uuid::new_v4().to_string();
+    let request_hash = GatewayReceipt::compute_request_hash("pay.toll.charge", "{}", issued_at_ms);
+    let partial = GatewayReceipt {
+        verdict_id: uuid::Uuid::new_v4().to_string(),
+        decision: "ALLOW".to_string(),
+        tool: "pay.toll.charge".to_string(),
+        params_json: "{}".to_string(),
+        policy_rule: "all_checks_passed".to_string(),
+        state_trust: "none".to_string(),
+        binding_id: fake_binding_id,
+        request_hash,
+        issued_at_ms,
+        nonce_hex,
+        signature_hex: String::new(),
+        attested_state_json: None,
+    };
+    let payload = partial.canonical_bytes().unwrap();
+    let sig: ed25519_dalek::Signature = adv.receipt_sk.sign(&payload);
+    let receipt = GatewayReceipt {
+        signature_hex: hex::encode(sig.to_bytes()),
+        ..partial
+    };
+
+    let resp = adv.send(&GatewayRequest::Enforce {
+        receipt: Box::new(receipt),
+    });
+    // Step 3.5 passes (binding_id is non-empty); Step 7 catches the unknown id.
+    assert!(
+        matches!(&resp, GatewayResponse::Refused { reason }
+            if reason.contains("no pending binding")),
+        "pay.* ALLOW with fake binding_id must be refused at Step 7; got: {resp:?}"
     );
 }
