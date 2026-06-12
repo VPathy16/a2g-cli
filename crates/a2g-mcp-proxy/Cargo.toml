@@ -1,0 +1,37 @@
+[package]
+name = "a2g-mcp-proxy"
+version = "0.2.0"
+edition = "2021"
+description = "A2G MCP Proxy — wraps any MCP tool server and forces every tool call through A2G governance (ADR-0019)"
+
+[lib]
+name = "a2g_mcp_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "a2g-mcp-proxy"
+path = "src/main.rs"
+
+[[bin]]
+name = "a2g-echo-mcp-server"
+path = "src/echo_server.rs"
+
+[dependencies]
+a2g-core = { path = "../a2g-core", features = ["operator-state"] }
+a2g-gateway = { path = "../a2g-gateway" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+bs58 = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }

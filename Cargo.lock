@@ -119,6 +119,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "a2g-mcp-proxy"
+version = "0.2.0"
+dependencies = [
+ "a2g-core",
+ "a2g-gateway",
+ "bs58",
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

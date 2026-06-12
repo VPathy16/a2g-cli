@@ -51,6 +51,34 @@ surfaces will require a v0.3.0 (semver minor + changelog entry):
   - Protocol freeze: no signed payload changes, no verdict semantic changes,
     no new a2g-core dependencies.
 
+### Added (S2 — MCP Proxy)
+
+- **New crate `a2g-mcp-proxy` (ADR-0020)** — A Model Context Protocol governance
+  proxy that wraps any downstream MCP tool server and forces every `tools/call`
+  through A2G governance before forwarding:
+  - Config (TOML, authoring-side only): downstream command/args, mandate path,
+    gateway socket, TrustAnchor source, and a `[tool_map]` table.
+  - Default rule: any unmapped tool → `unmapped.<tool_name>` (not in any mandate
+    → DENY, fail-closed; audit trail records the real tool name, not a payment namespace).
+  - Flow: `map tool → capability` → `decide()` → sign receipt → gateway
+    `Enforce` → forward downstream only on gateway accept.
+  - DENY/EXPIRED → MCP error `-32001` (`a2g_denied`). Downstream never called.
+  - PENDING_APPROVAL (ESCALATE) → MCP error `-32002` (`a2g_escalate`) with
+    `binding_id`. Gateway queues the binding via `SignBinding`. Downstream not called.
+  - Gateway refuse → MCP error `-32003`. Downstream not called.
+  - `DownstreamTransport` trait seam for HTTP/SSE (currently `unimplemented!()`).
+  - Stdio MCP JSON-RPC 2.0 with Content-Length framing.
+  - `a2g-echo-mcp-server` demo binary: logs every call to stderr for e2e test
+    verification.
+  - Demo config at `crates/a2g-mcp-proxy/demo/proxy.toml`.
+  - README with 10-minute quickstart.
+  - 5 e2e tests: (a) allowed call with receipt metadata, (b) denied call with
+    zero downstream calls, (c) unmapped tool not forwarded (DENY), (d) `pay.*`
+    escalated without binding, (e) missing demo key file rejected at startup.
+- **Conformance vector po-010** — ALLOW companion to po-007: `now_ms` pins
+  2026-01-15T12:00:00Z (noon UTC, inside 09:00–17:00 window); expected ALLOW.
+  Both operating-hours branches (DENY outside / ALLOW inside) are now deterministic.
+
 ### Added (S1 — Cockpit Domains)
 
 - **Cockpit domain extension — comms.\*, pay.\*, pii.\* (ADR-0018 / SPEC §3.6)** —
