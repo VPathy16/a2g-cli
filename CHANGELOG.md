@@ -26,6 +26,51 @@ surfaces will require a v0.3.0 (semver minor + changelog entry):
 
 ## [Unreleased]
 
+### Added (S1 — Cockpit Domains)
+
+- **Cockpit domain extension — comms.\*, pay.\*, pii.\* (ADR-0018 / SPEC §3.6)** —
+  Three new capability namespaces for in-cabin agents operating beyond vehicle
+  control:
+  - `pay.*` — All payment-namespace tools require human-in-the-loop approval
+    unconditionally (always-HITL). An ALLOW receipt for any `pay.*` tool
+    without a Phase 2 binding is refused by the gateway.
+  - `comms.call.place`, `comms.sms.send` — Always-HITL. Call placement and
+    outbound message sending require explicit human approval on every invocation.
+  - `comms.contacts.read`, `comms.history.read` — Require the `"pii.grant"`
+    capability sentinel in the mandate's `tools` list; DENY without it.
+  - `pii.profile.export` — **Structurally Forbidden** (same tier as
+    `CRUISE_CONTROL_COMMAND`). Refused unconditionally before any mandate
+    evaluation; no approval grant can override this.
+  - `pii.<ns>.read` — Requires `"pii.grant"` sentinel; DENY without it.
+  - Unknown `comms.*`, `pay.*`, `pii.*` sub-operations — Always-HITL
+    (fail-closed forward-compatibility rule).
+
+- **`pii.grant` capability sentinel** — A new capability token that mandate
+  issuers include in `capabilities.tools` to grant PII access. This is
+  protocol-freeze-compliant: no new fields are added to `MandateTbs`.
+
+- **`a2g_core::cockpit` module** — `CockpitDomain` enum and
+  `classify_cockpit_tool()` pure function; 12 unit tests. Adds three new
+  enforcement checks to `decide_core()`:
+  - Pre-check: cockpit forbidden domain (after vehicle forbidden).
+  - Step 3.5: PII grant sentinel check.
+  - Step 6a: Always-HITL cockpit domains (fires before `escalate_tools` check).
+
+- **Gateway cockpit enforcement (ADR-0018)** — `forbidden.rs` extended with
+  `is_cockpit_forbidden()` and `requires_hitl_binding()`; `handle_enforce()`
+  gains Step 1.5 (cockpit forbidden re-check) and Step 3.5 (always-HITL
+  binding guard).
+
+- **Conformance vectors (10-cockpit-domains, 15 vectors)** — cd-001 through
+  cd-015 cover pay.* always-HITL, comms.* always-HITL, pii.grant-gated reads,
+  pii.profile.export forbidden, unknown cockpit namespace fail-closed, and
+  pii.grant sentinel isolation.
+
+- **Adversarial attacks 12–14** — Attack 12: pay.* ALLOW without HITL binding
+  (Step 3.5). Attack 13: pii.profile.export cockpit forbidden bypass (Step 1.5).
+  Attack 14: pii-gated comms.contacts.read forged with wrong signing key
+  (Step 2). All 14 adversarial attacks pass.
+
 ### Added
 
 - **CBOR transport framing (P4)** — the Unix socket protocol is now

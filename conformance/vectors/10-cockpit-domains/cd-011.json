@@ -1,0 +1,36 @@
+{
+  "id": "cd-011",
+  "spec_ref": "§3.X ADR-0018",
+  "category": "cockpit-domains",
+  "description": "pii.location.read with pii.grant produces ALLOW",
+  "known_failing": false,
+  "known_failing_reason": null,
+  "input": {
+    "mandate_capabilities": ["pii.location.read", "pii.grant"],
+    "mandate_escalate_tools": [],
+    "mandate_expires_in_hours": 24,
+    "mandate_bad_signature": false,
+    "mandate_use_spec_signing": false,
+    "mandate_workspace_root": null,
+    "mandate_operating_hours": null,
+    "mandate_rate_limit": 120,
+    "mandate_fs_deny": [],
+    "mandate_fs_read": [],
+    "mandate_fs_write": [],
+    "capability": "pii.location.read",
+    "params": {},
+    "state_speed_kph": null,
+    "state_gear": null,
+    "state_actor": null,
+    "state_trust": null,
+    "clock_offset_seconds": 0,
+    "phase2_grant_type": null,
+    "gateway_test_type": null
+  },
+  "expected": {
+    "verdict": "ALLOW",
+    "policy_rule_contains": "all_checks_passed",
+    "gateway_enforced": null,
+    "gateway_refused_reason_contains": null
+  }
+}

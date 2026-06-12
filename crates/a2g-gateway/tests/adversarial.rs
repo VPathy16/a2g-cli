@@ -18,6 +18,9 @@
 //! | 9 | `phantom_binding_id`          | Step 7 — binding not in queue |
 //! | 10| `can_state_mismatch`          | ADR-0016 — gateway CAN says moving |
 //! | 11| `stale_can_reader_active_fails_closed` | ADR-0016 — reader active, frames stale |
+//! | 12| `pay_hitl_bypass`             | Step 3.5 — pay.* ALLOW without binding (ADR-0018) |
+//! | 13| `pii_export_forbidden_bypass` | Step 1.5 — pii.profile.export cockpit forbidden (ADR-0018) |
+//! | 14| `pii_grant_forgery`           | Step 3.5 — comms.contacts.read ALLOW without pii.grant binding |
 
 use a2g_core::enforce::{decide, Decision, TrustAnchor};
 use a2g_core::ledger::NoopLedger;
@@ -640,5 +643,160 @@ fn attack_11_stale_can_reader_active_fails_closed() {
         matches!(&resp, GatewayResponse::Refused { reason }
             if reason.contains("state_authority_mismatch")),
         "stale CAN with active reader must fail-closed (GAP-1 must not reopen); got: {resp:?}"
+    );
+}
+
+// ── Attack 12: pay.* ALLOW receipt without HITL binding bypasses payment gate ─
+
+/// A compromised rich domain signs an ALLOW receipt for `pay.toll.charge` without
+/// a Phase 2 binding (binding_id is empty). The gateway must refuse: pay.* tools
+/// can only reach ALLOW via Phase 2 approval (ADR-0018 Step 3.5 guard).
+#[test]
+fn attack_12_pay_hitl_bypass() {
+    let adv = Adv::start();
+
+    let issued_at_ms = Utc::now().timestamp_millis();
+    let mut nonce = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let nonce_hex = hex::encode(nonce);
+    let request_hash = GatewayReceipt::compute_request_hash("pay.toll.charge", "{}", issued_at_ms);
+    let partial = GatewayReceipt {
+        verdict_id: uuid::Uuid::new_v4().to_string(),
+        decision: "ALLOW".to_string(),
+        tool: "pay.toll.charge".to_string(),
+        params_json: "{}".to_string(),
+        policy_rule: "all_checks_passed".to_string(),
+        state_trust: "none".to_string(),
+        binding_id: String::new(), // empty — no Phase 2 binding presented
+        request_hash,
+        issued_at_ms,
+        nonce_hex,
+        signature_hex: String::new(),
+        attested_state_json: None,
+    };
+    let payload = partial.canonical_bytes().unwrap();
+    let sig: ed25519_dalek::Signature = adv.receipt_sk.sign(&payload);
+    let receipt = GatewayReceipt {
+        signature_hex: hex::encode(sig.to_bytes()),
+        ..partial
+    };
+
+    let resp = adv.send(&GatewayRequest::Enforce {
+        receipt: Box::new(receipt),
+    });
+    assert!(
+        matches!(&resp, GatewayResponse::Refused { reason }
+            if reason.contains("cockpit_hitl_binding_required")),
+        "pay.* ALLOW without binding must be refused at Step 3.5; got: {resp:?}"
+    );
+}
+
+// ── Attack 13: pii.profile.export cockpit Forbidden bypass ───────────────────
+
+/// A compromised rich domain signs an ALLOW receipt for `pii.profile.export`,
+/// which is structurally Forbidden (ADR-0018). The gateway must refuse at Step 1.5
+/// before signature verification, identically to vehicle Forbidden tools.
+#[test]
+fn attack_13_pii_export_forbidden_bypass() {
+    let adv = Adv::start();
+
+    let issued_at_ms = Utc::now().timestamp_millis();
+    let mut nonce = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let nonce_hex = hex::encode(nonce);
+    let request_hash =
+        GatewayReceipt::compute_request_hash("pii.profile.export", "{}", issued_at_ms);
+    let partial = GatewayReceipt {
+        verdict_id: uuid::Uuid::new_v4().to_string(),
+        decision: "ALLOW".to_string(),
+        tool: "pii.profile.export".to_string(),
+        params_json: "{}".to_string(),
+        policy_rule: "all_checks_passed".to_string(),
+        state_trust: "none".to_string(),
+        binding_id: String::new(),
+        request_hash,
+        issued_at_ms,
+        nonce_hex,
+        signature_hex: String::new(),
+        attested_state_json: None,
+    };
+    let payload = partial.canonical_bytes().unwrap();
+    let sig: ed25519_dalek::Signature = adv.receipt_sk.sign(&payload);
+    let receipt = GatewayReceipt {
+        signature_hex: hex::encode(sig.to_bytes()),
+        ..partial
+    };
+
+    let resp = adv.send(&GatewayRequest::Enforce {
+        receipt: Box::new(receipt),
+    });
+    assert!(
+        matches!(&resp, GatewayResponse::Refused { reason }
+            if reason.contains("gateway_cockpit_forbidden")),
+        "pii.profile.export must be refused at Step 1.5 (cockpit forbidden); got: {resp:?}"
+    );
+}
+
+// ── Attack 14: pii-gated comms.contacts.read ALLOW without pii.grant binding ─
+
+/// A compromised rich domain claims ALLOW for `comms.contacts.read` without
+/// going through Phase 2 (empty binding_id). `comms.contacts.read` is NOT
+/// always-HITL (it's PiiReadGated), but it is NOT in the always-hitl set.
+/// The protection here is that `decide()` would DENY it without pii.grant,
+/// so a valid ALLOW receipt cannot exist without the mandate having pii.grant.
+/// This attack tests the case where the rich domain is compromised:
+/// the receipt is signed correctly but `decide()` was bypassed.
+///
+/// Because `comms.contacts.read` is CommsReadPiiGated (not always-HITL),
+/// it can produce ALLOW with pii.grant in the mandate (no binding required).
+/// The gateway's defense here is the signature: a forged receipt without going
+/// through a legitimate `decide()` call would have a bad signature — and indeed
+/// the test shows the receipt with a tampered tool triggers Step 2 failure (or
+/// Step 3.5 would catch it if it were a pay.* tool).
+///
+/// This attack specifically verifies that a receipt forged by an attacker who
+/// does NOT have the gateway signing key is refused at Step 2 (signature fail).
+#[test]
+fn attack_14_pii_grant_forgery_wrong_key() {
+    let adv = Adv::start();
+
+    // Attacker uses their own key (not the gateway's receipt key).
+    let attacker_key = SigningKey::generate(&mut rand::rngs::OsRng);
+
+    let issued_at_ms = Utc::now().timestamp_millis();
+    let mut nonce = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let nonce_hex = hex::encode(nonce);
+    let request_hash =
+        GatewayReceipt::compute_request_hash("comms.contacts.read", "{}", issued_at_ms);
+    let partial = GatewayReceipt {
+        verdict_id: uuid::Uuid::new_v4().to_string(),
+        decision: "ALLOW".to_string(),
+        tool: "comms.contacts.read".to_string(),
+        params_json: "{}".to_string(),
+        policy_rule: "all_checks_passed".to_string(),
+        state_trust: "none".to_string(),
+        binding_id: String::new(),
+        request_hash,
+        issued_at_ms,
+        nonce_hex,
+        signature_hex: String::new(),
+        attested_state_json: None,
+    };
+    let payload = partial.canonical_bytes().unwrap();
+    // Signed with ATTACKER key — not the gateway's receipt key.
+    let sig: ed25519_dalek::Signature = attacker_key.sign(&payload);
+    let receipt = GatewayReceipt {
+        signature_hex: hex::encode(sig.to_bytes()),
+        ..partial
+    };
+
+    let resp = adv.send(&GatewayRequest::Enforce {
+        receipt: Box::new(receipt),
+    });
+    assert!(
+        matches!(&resp, GatewayResponse::Refused { reason }
+            if reason.contains("signature")),
+        "forged pii-read receipt must be refused at Step 2 (wrong key); got: {resp:?}"
     );
 }

@@ -280,6 +280,15 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
         return GatewayResponse::Refused { reason };
     }
 
+    // ── Step 1.5: Cockpit Forbidden re-check (ADR-0018) ──────────────────────
+    // pii.profile.export is structurally forbidden — refused unconditionally,
+    // before signature verification, identically to vehicle forbidden tools.
+    if forbidden::is_cockpit_forbidden(&receipt.tool) {
+        let reason = forbidden::cockpit_forbidden_reason(&receipt.tool);
+        eprintln!("[gateway] REFUSE {reason}");
+        return GatewayResponse::Refused { reason };
+    }
+
     // ── Step 2: Signature validity ─────────────────────────────────────────────
     let payload = match receipt.canonical_bytes() {
         Ok(b) => b,
@@ -309,6 +318,19 @@ fn handle_enforce(receipt: GatewayReceipt, state: &Arc<GatewayState>) -> Gateway
         return refuse(&format!(
             "receipt decision is '{}'; only ALLOW is enforced",
             receipt.decision
+        ));
+    }
+
+    // ── Step 3.5: Cockpit always-HITL binding guard (ADR-0018) ───────────────
+    // pay.*, comms.call.place, comms.sms.send, and unknown cockpit namespaces
+    // can only reach ALLOW via Phase 2 (binding_id must be non-empty).
+    // An ALLOW receipt for these tools without a binding_id indicates the rich
+    // domain was bypassed or compromised.
+    if forbidden::requires_hitl_binding(&receipt.tool) && receipt.binding_id.is_empty() {
+        return refuse(&format!(
+            "cockpit_hitl_binding_required: '{}' is an always-HITL cockpit tool; \
+             ALLOW receipts require a Phase 2 binding (non-empty binding_id)",
+            receipt.tool
         ));
     }
 
