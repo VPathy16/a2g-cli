@@ -21,6 +21,7 @@
 
 pub mod authority;
 pub mod cbor;
+pub mod cockpit;
 pub mod enforce;
 pub mod error;
 pub mod hitl;

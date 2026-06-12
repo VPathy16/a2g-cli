@@ -283,6 +283,51 @@ The automotive/VHAL profile (mapping AAOS `VehicleProperty` symbolic names to
 risk tiers) is one such profile. Its contents are outside the scope of this
 specification; it is documented separately.
 
+### 3.6 Cockpit Domain Namespace Registry (ADR-0018)
+
+Three additional namespaces are defined as a cockpit extension to the base
+vehicle domain model. Implementations MUST classify tools in these namespaces
+according to the rules below. All other protocol semantics (§4, §5, §7, §9)
+remain unchanged.
+
+#### 3.6.1 Classification Table
+
+| Namespace | Tool pattern | Risk tier | Additional constraint |
+|-----------|-------------|-----------|----------------------|
+| `comms.*` | `comms.call.place`, `comms.sms.send` | Sensitive | Always-HITL (§7) |
+| `comms.*` | `comms.contacts.read`, `comms.history.read` | Sensitive | Requires `pii.grant` capability sentinel |
+| `comms.*` | Any other `comms.*` | Sensitive | Always-HITL (fail-closed forward-compat) |
+| `pay.*`   | Any `pay.*` | Sensitive | Always-HITL |
+| `pii.*`   | `pii.profile.export` | **Forbidden** | Hard DENY — no mandate or grant can override |
+| `pii.*`   | Any `pii.<ns>.read` | Sensitive | Requires `pii.grant` capability sentinel |
+| `pii.*`   | Any other `pii.*` | Sensitive | Always-HITL (fail-closed forward-compat) |
+
+#### 3.6.2 Forward-Compatibility Rule
+
+Unknown sub-operations within `comms.*`, `pay.*`, or `pii.*` namespaces MUST
+be treated as Sensitive with always-HITL. This ensures that new cockpit
+capabilities added in future protocol versions default to human approval rather
+than silent allow.
+
+#### 3.6.3 PII Grant Sentinel
+
+The `"pii.grant"` string is a **capability sentinel** — not a callable tool.
+When present in a mandate's `capabilities.tools` list, it signals that the
+mandate holder has been granted PII access permission. Tools classified as
+`pii-gated` (comms.contacts.read, comms.history.read, pii.\*.read) MUST be
+DENIED unless `"pii.grant"` is present in the mandate.
+
+This mechanism is protocol-freeze-compliant: it uses the existing `tools` field
+(§4.2) without adding new signed fields to the mandate format.
+
+#### 3.6.4 Always-HITL Invariant
+
+A tool classified as always-HITL MUST produce a `PendingApproval` verdict on
+Phase 1 regardless of whether it appears in the mandate's `escalate_tools` list.
+An ALLOW receipt for an always-HITL tool MUST carry a non-empty `binding_id`
+(§9.5 Step 3.5): the enforcing gateway MUST refuse an ALLOW receipt for any
+always-HITL tool that presents an empty `binding_id`.
+
 ---
 
 ## 4. Mandate Format

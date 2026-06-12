@@ -252,6 +252,13 @@ pub fn decide_with_approval<L: EnforceLedger>(
             tool
         )));
     }
+    if crate::cockpit::classify_cockpit_tool(tool) == crate::cockpit::CockpitDomain::Forbidden {
+        return Ok(make_early_deny(&format!(
+            "cockpit_forbidden_domain: '{}' is structurally forbidden \
+             and cannot be granted by any mandate or approval",
+            tool
+        )));
+    }
 
     // ── Step 1 (Phase 2): Validate approval grant ──
     if let Err(e) = grant.verify_against_binding(pending, now) {
@@ -421,6 +428,23 @@ fn decide_core<L: EnforceLedger>(
         ));
     }
 
+    // ── Pre-check: Cockpit Forbidden Domain (ADR-0018) ──
+    // pii.profile.export is structurally Forbidden — no mandate, escalation grant,
+    // or approval can override this. Checked immediately after vehicle forbidden.
+    if crate::cockpit::classify_cockpit_tool(tool) == crate::cockpit::CockpitDomain::Forbidden {
+        return Ok(make_verdict(
+            Decision::Deny,
+            &format!(
+                "cockpit_forbidden_domain: '{}' is structurally forbidden \
+                 and cannot be granted by any mandate or approval",
+                tool
+            ),
+        ));
+    }
+
+    // Classify cockpit domain once — used at Step 3.5 and Step 6.
+    let cockpit_domain = crate::cockpit::classify_cockpit_tool(tool);
+
     // ── Step 0: Revocation Check ──
     if ledger.is_revoked(&m.mandate.agent_did, &mandate_hash)? {
         return Ok(make_verdict(
@@ -460,6 +484,24 @@ fn decide_core<L: EnforceLedger>(
         return Ok(make_verdict(
             Decision::Deny,
             &format!("tool_not_authorized: '{}' not in capabilities.tools", tool),
+        ));
+    }
+
+    // ── Step 3.5: PII Grant Check (ADR-0018) ──
+    // PiiReadGated and CommsReadPiiGated tools require the "pii.grant" sentinel
+    // capability to be present in the mandate's tools list. This is the
+    // protocol-freeze-compliant way to express pii access permission without
+    // adding new fields to MandateTbs.
+    if cockpit_domain.requires_pii_grant()
+        && !m.capabilities.tools.contains(&"pii.grant".to_string())
+    {
+        return Ok(make_verdict(
+            Decision::Deny,
+            &format!(
+                "pii_grant_required: '{}' requires the 'pii.grant' capability sentinel \
+                 in the mandate's tools list",
+                tool
+            ),
         ));
     }
 
@@ -629,6 +671,34 @@ fn decide_core<L: EnforceLedger>(
 
     // ── Step 6: Escalation Check (skipped in Phase 2 when grant is valid) ──
     if !skip_escalation {
+        // ── Step 6a: Always-HITL cockpit domains (ADR-0018) ──
+        // pay.*, comms.call.place, comms.sms.send, and unknown cockpit namespaces
+        // require HITL regardless of whether they appear in escalate_tools.
+        if cockpit_domain.always_hitl() {
+            let timestamp = now.to_rfc3339();
+            let request_hash = compute_request_hash(&mandate_hash, tool, &params_hash, &timestamp);
+            let binding_id = uuid::Uuid::new_v4().to_string();
+            let ttl_expires_at = now
+                .checked_add_signed(Duration::minutes(PENDING_APPROVAL_TTL_MINUTES))
+                .unwrap_or(now);
+            let pending = PendingApprovalBinding {
+                binding_id,
+                request_hash,
+                escalate_to: m.escalation.escalate_to.clone(),
+                ttl_expires_at,
+            };
+            let mut v = make_verdict(
+                Decision::PendingApproval,
+                &format!(
+                    "cockpit_hitl_required: '{}' requires human-in-the-loop approval \
+                     (ADR-0018: cockpit domain always-HITL)",
+                    tool
+                ),
+            );
+            v.pending_approval = Some(pending);
+            return Ok(v);
+        }
+
         if m.escalation.escalate_tools.contains(&tool.to_string()) {
             let timestamp = now.to_rfc3339();
             let request_hash = compute_request_hash(&mandate_hash, tool, &params_hash, &timestamp);

@@ -75,6 +75,28 @@ Every vehicle tool call is classified into one of four domains before any mandat
 
 Unknown `vehicle.*` sub-domains are treated as Sensitive (fail-safe).
 
+### Cockpit domain extensions (S1 — ADR-0018)
+
+Three additional namespaces extend the base vehicle model for in-cabin agent use cases beyond vehicle control.
+
+| Namespace | Tool | Classification | Constraint |
+|-----------|------|----------------|-----------|
+| `comms.*` | `comms.call.place`, `comms.sms.send` | Sensitive | **Always HITL** |
+| `comms.*` | `comms.contacts.read`, `comms.history.read` | Sensitive | Requires `pii.grant` capability |
+| `comms.*` | Unknown sub-operations | Sensitive | **Always HITL** (fail-closed) |
+| `pay.*` | Any | Sensitive | **Always HITL** |
+| `pii.*` | `pii.profile.export` | **Forbidden** | Hard DENY — structurally blocked |
+| `pii.*` | `pii.<ns>.read` | Sensitive | Requires `pii.grant` capability |
+| `pii.*` | Unknown sub-operations | Sensitive | **Always HITL** (fail-closed) |
+
+**Always HITL** means the capability unconditionally generates a `PendingApproval` verdict regardless of the mandate's `escalate_tools` list. A human must approve every invocation.
+
+**`pii.grant`** is a capability sentinel: a string added to the mandate's `tools` list that signals PII access permission. Without it, any pii-gated tool call is DENY. This does not change the mandate wire format.
+
+**`pii.profile.export` is Forbidden** — equivalent to `CRUISE_CONTROL_COMMAND`. It creates a persistent artefact outside the vehicle that cannot be recalled; no approval can override this.
+
+Unknown sub-operations within `comms.*`, `pay.*`, or `pii.*` default to always-HITL rather than allow — forward-compatibility without silent escalation.
+
 ### State gating
 
 Sensitive capabilities (window, door, trunk, lock) require `speed_kph < 5.0 AND gear == Park`. The verdict is DENY — not ESCALATE — when the vehicle is moving; state denial fires before the escalation step.
