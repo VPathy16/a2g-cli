@@ -1,0 +1,4 @@
+This directory contains the Gradle wrapper files.
+Run `gradle wrapper --gradle-version 8.7` from sdk/android/ to generate them,
+or copy gradlew/gradlew.bat from any Android project.
+See sdk/android/README.md for setup instructions.
