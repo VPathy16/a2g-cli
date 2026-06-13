@@ -90,7 +90,7 @@ class MockJniBridge(
         /** Dummy verdictId for mock responses. */
         private const val MOCK_VERDICT_ID = "mock-verdict-00000000-0000-0000-0000-000000000000"
         private const val MOCK_BINDING_ID = "mock-binding-00000000-0000-0000-0000-000000000000"
-        private const val MOCK_REQUEST_HASH = "a".repeat(64)
+        private val MOCK_REQUEST_HASH = "a".repeat(64)
         private const val MOCK_RECEIPT = "{\"mock\":true,\"verdict_id\":\"$MOCK_VERDICT_ID\"}"
     }
 

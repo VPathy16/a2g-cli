@@ -29,12 +29,16 @@ object A2g {
     /**
      * Pluggable JNI bridge — real native bridge in production, mock in host tests.
      *
-     * The bridge is settable via [setBridgeForTesting] before [init] is called.
-     * This seam allows host-JVM unit tests to run without an Android device or
-     * the a2g-ffi shared library.
+     * [testBridge] is null in production; [setBridgeForTesting] sets it before
+     * [init] is called in tests. Keeping a separate nullable avoids accessing
+     * [NativeJniBridge] (which triggers System.loadLibrary) at class-load time.
      */
     @Volatile
-    private var bridge: JniBridge = NativeJniBridge
+    private var testBridge: JniBridge? = null
+
+    // Computed property — NativeJniBridge is accessed only when testBridge is null
+    // (i.e., only in production, never during host-JVM tests).
+    private val bridge: JniBridge get() = testBridge ?: NativeJniBridge
 
     /** Stable reference to the initialized state. */
     private val stateRef = AtomicReference<InitState?>(null)
@@ -146,13 +150,13 @@ object A2g {
      * This method is annotated with @VisibleForTesting but is not guarded by
      * a compile-time annotation to avoid requiring a test dependency at runtime.
      */
-    fun setBridgeForTesting(testBridge: JniBridge) {
-        bridge = testBridge
+    fun setBridgeForTesting(mock: JniBridge) {
+        testBridge = mock
     }
 
     /** Reset the bridge to the real native bridge (call in @After to clean up). */
     fun resetBridge() {
-        bridge = NativeJniBridge
+        testBridge = null
     }
 
     /** Reset init state (useful in tests). */
